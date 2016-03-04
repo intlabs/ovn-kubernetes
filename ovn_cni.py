@@ -1,7 +1,5 @@
 #!/usr/bin/python
 import argparse
-import atexit
-import getpass
 import json
 import netaddr
 import os
@@ -11,10 +9,7 @@ import requests
 import shlex
 import subprocess
 import sys
-import time
-import uuid
 
-import docker
 from oslo_config import cfg
 from oslo_log import log
 
@@ -23,9 +18,6 @@ LOG = log.getLogger(__name__)
 
 DEFAULT_LROUTER_NAME = "k8s-router"
 OVN_BRIDGE = "br-int"
-
-DEFAULT_BRIDGE_OPT = "com.docker.network.bridge.default_bridge"
-BRIDGE_NAME_OPT = "com.docker.network.bridge.name"
 
 CNI_VERSION = "0.1.0"
 CNI_COMMAND = "CNI_COMMAND"
@@ -39,7 +31,7 @@ def call_popen(cmd):
     output = child.communicate()
     if child.returncode:
         raise RuntimeError("Fatal error executing %s" % " ".join(cmd))
-    if len(output) == 0 or output[0] == None:
+    if not output or not output[0]:
         output = ""
     else:
         output = output[0].strip()
@@ -61,7 +53,7 @@ def get_ovn_remote():
             get_ovn_remote.location = ovs_vsctl(
                 "get", "Open_vSwitch", ".",
                 "external_ids:ovn-remote").strip('"')
-        except Exception as e: 
+        except Exception as e:
             # TODO: custom exceptions
             raise Exception("Unable to find a location for the "
                             "OVN NorthBound DB:%s" % e)
@@ -85,7 +77,7 @@ def parse_ovn_nbctl_output(data, scalar=False):
         if not line:
             continue
         # This is very rough at some point I'd like to stop shelling out
-        # to ovn-nbctl 
+        # to ovn-nbctl
         if line.startswith('_uuid'):
             if item:
                 if scalar:
@@ -127,36 +119,6 @@ def _parse_stdin():
         raise OVNCNIException(101, 'invalid JSON input')
 
 
-def get_default_docker_network(dc):
-    docker_nets = dc.networks()
-    # Find default bridge network
-    default_docker_nets = [net for net in docker_nets if
-                           net['Driver'] == 'bridge' and
-                           net['Options'].get(DEFAULT_BRIDGE_OPT) == 'true']
-    if not default_docker_nets:
-        print( "Cannot find the default docker bridge network")
-        return
-    default_docker_net = default_docker_nets.pop()
-    if default_docker_nets:
-        print("Multiple default docker bridge networks found: %d."
-              "I must be drunk as this cannot be true" %
-              len(default_docker_nets) + 1)
-        return
-    return default_docker_net
-
-
-def get_network_info(docker_net):
-    """Find bridge name, subnet cidr and gateway"""
-    bridge_name = docker_net['Options'].get(BRIDGE_NAME_OPT)
-    subnet_cidr = subnet_gw = ""
-    for item in docker_net['IPAM'].get('Config', []):
-        if 'Subnet' in item:
-            subnet_cidr = item['Subnet']
-            subnet_gw = item['Gateway']
-            break
-    return bridge_name, subnet_cidr, subnet_gw
-
-
 def _generate_mac(prefix="00:00:00"):
     random.seed()
     # This is obviously not collition free, but come on! Seriously,
@@ -167,6 +129,7 @@ def _generate_mac(prefix="00:00:00"):
         random.randint(0, 255),
         random.randint(0, 255))
     return mac
+
 
 def _get_host_lswitch_name():
     # Use kubelet introspection API to grab machine ID.
@@ -183,9 +146,9 @@ def _check_vswitch(lswitch_name):
                                  'name=%s' % lswitch_name)
     lswitch_data = parse_ovn_nbctl_output(lswitch_raw_data)
     if len(lswitch_data) > 1:
-        LOG.warn("I really was not expecting more than one switch... I'll pick "
-                 "the first, there's a %.2f\% chance I'll get it right" %
-                 (100/len(lswitch_data)))
+        LOG.warn("I really was not expecting more than one switch... I'll "
+                 "pick the first, there's a %.2f\% chance I'll get it right" %
+                 (100 / len(lswitch_data)))
     if lswitch_data:
         lswitch_data = lswitch_data[0]
         LOG.debug("OVN Logical Switch for K8S host found. Skipping creation")
@@ -198,11 +161,12 @@ def _check_host_vswitch(args, network_config):
     lswitch_name = _get_host_lswitch_name()
     if not _check_vswitch(lswitch_name):
         try:
-            init_host(args, network_config=network_config, check_local_vswitch=False)
+            init_host(args, network_config=network_config,
+                      check_local_vswitch=False)
         except Exception:
-            # Log the exception but keep running. It is likely that pod networking won't
-            # work but it's not a good reason for blocking pod startup as networking can
-            # be fixed later on
+            # Log the exception but keep running. It is likely that pod
+            # networking won't work but it's not a good reason for blocking
+            # pod startup as networking can be fixed later on
             LOG.Exception("Error while setting up OVN for K8S host")
     return lswitch_name
 
@@ -271,7 +235,7 @@ def _cni_add(network_config, lswtitch_name):
         pid_match = re.match("^/proc/(.\d*)/ns/net$", netns_dst)
         if not pid_match:
             raise OVNCNIException(
-                103,"Unable to extract container pid from namespace")
+                103, "Unable to extract container pid from namespace")
         pid = pid_match.groups()[0]
         cidr = netaddr.IPNetwork(network_config['ipam']['subnet'])
         mac = _generate_mac()
@@ -283,7 +247,7 @@ def _cni_add(network_config, lswtitch_name):
     try:
         random.seed()
         ip_address = netaddr.IPAddress(random.randint(
-            cidr.first + 2, cidr.last -1))
+            cidr.first + 2, cidr.last - 1))
         gateway_ip = netaddr.IPAddress(cidr.first + 1)
     except Exception:
         LOG.exception("Error while generating IP adress from CIDR:%s", cidr)
@@ -302,12 +266,12 @@ def _cni_add(network_config, lswtitch_name):
     try:
         # Create logical port
         LOG.debug("Creating logical port on switch %s for container %s",
-                  lswitch_name, container_id))
+                  lswitch_name, container_id)
         ovn_nbctl('lport-add', lswitch_name, container_id)
         # Set the ip address and mac address
         LOG.debug("Setting up MAC (%s) and IP (%s) addresses for logical port",
                   mac, ip_address)
-        ovn_nbctl('lport-set-addresses', container_id ,
+        ovn_nbctl('lport-set-addresses', container_id,
                   '"%s %s"' % (mac, ip_address))
     except Exception:
         LOG.exception("Unable to configure OVN logical port for pod on "
@@ -316,7 +280,7 @@ def _cni_add(network_config, lswtitch_name):
 
     # Configure the veth pair for the pod
     veth_inside, veth_outside = _setup_pod_interface(
-         pid, container_id, dev, mac, ip_address, cidr.prefixlen, gateway_ip)
+        pid, container_id, dev, mac, ip_address, cidr.prefixlen, gateway_ip)
 
     # Add the port to a OVS bridge and set the vlan
     try:
@@ -325,15 +289,16 @@ def _cni_add(network_config, lswtitch_name):
                   'external_ids:attached_mac=%s' % mac,
                   'external_ids:iface-id=%s' % container_id,
                   'external_ids:ip_address=%s' % ip_address)
-    except Exception as e:
+    except Exception:
         LOG.exception("Unable to plug interface into OVN bridge")
         ovn_nbctl("lport-del", container_id)
         raise OVNCNIException(106, "Failure in plugging pod interface")
 
-    return {'ip_address': ip_address,
-            'gatway_ip': gateway_ip.
-            'mac_address': mac,
-            'lport_uuid': lport_uuid}
+    return {
+        'ip_address': ip_address,
+        'gateway_ip': gateway_ip,
+        'mac_address': mac,
+        'lport_uuid': lport_uuid}
 
     # REPLACE WITH THIRD PARTY RESOURCE
     # annotations = get_annotations(ns, pod_name)
@@ -360,15 +325,18 @@ def init_host(args, network_config=None, check_local_switch=True):
                                  'name=%s' % lrouter_name)
     lrouter_data = parse_ovn_nbctl_output(lrouter_raw_data)
     if len(lrouter_data) > 1:
-        LOG.warn("I really was not expecting more than one router... I'll pick "
-                 "the first, there's a %.2f\% chance I'll get it right" %
-                 (100/len(lrouter_data)))
+        LOG.warn("I really was not expecting more than one router... I'll "
+                 "pick the first, there's a %.2f\% chance I'll get it right",
+                 (100 / len(lrouter_data)))
     if lrouter_data:
         lrouter_data = lrouter_data[0]
-        LOG.debug("Logical router for K8S networking found. Skipping creation")
+        LOG.debug("Logical router for K8S networking found. "
+                  "Skipping creation")
     else:
-        LOG.debug("Creating Logical Router for K8S networking with name:%s", lrouter_name)
-        output = ovn_nbctl('create', 'Logical_Router', 'name=%s' % lrouter_name)
+        LOG.debug("Creating Logical Router for K8S networking with name:%s",
+                  lrouter_name)
+        output = ovn_nbctl('create', 'Logical_Router',
+                           'name=%s' % lrouter_name)
         LOG.debug("Will use OVN Logical Router:%s", output)
 
     # Check for host logical switch. If not found create one
@@ -380,7 +348,8 @@ def init_host(args, network_config=None, check_local_switch=True):
     if lswitch_data:
         LOG.debug("OVN Logical Switch for K8S host found. Skipping creation")
     else:
-        LOG.debug("Creating LogicalSwitch for K8S host with name:%s", lswitch_name)
+        LOG.debug("Creating LogicalSwitch for K8S host with name: %s",
+                  lswitch_name)
         ovn_nbctl('lswitch-add', lswitch_name)
 
     if network_config:
@@ -393,15 +362,16 @@ def init_host(args, network_config=None, check_local_switch=True):
         LOG.debug("As no subnet was specified host configuration will "
                   "not be completed")
         return
-    # Check for logical router port connecting local logical switch to kubernetes router.
+    # Check for logical router port connecting local logical switch to
+    # kubernetes router.
     # If not found create one, and connect it to both router and switch
     lrp_raw_data = ovn_nbctl('find', 'Logical_Router_port',
-                                 'name=%s' % lswitch_name)
+                             'name=%s' % lswitch_name)
     lrp_data = parse_ovn_nbctl_output(lrp_raw_data)
     if len(lrp_data) > 1:
-        LOG.warn("I really was not expecting more than one router port... I'll "
-                 "pick the first, there's a %.2f\% chance I'll get it right" %
-                 (100/len(lrp_data)))
+        LOG.warn("I really was not expecting more than one router port... "
+                 "I'll pick the first, there's a %.2f\% chance I'll get it "
+                 "right", (100 / len(lrp_data)))
     if lrp_data:
         lrp_data = lrp_data[0]
         LOG.debug("OVN logical router port for K8S host found."
@@ -410,14 +380,17 @@ def init_host(args, network_config=None, check_local_switch=True):
     else:
         lrp_mac = _generate_mac()
         cidr = netaddr.IPNetwork(subnet)
-        ip_address =netaddr.IPAddress(cidr.first + 1)
-        lrp_uuid = ovn_nbctl('--','--id=@lrp','create','Logical_Router_port',
-                             'name=%s' % lswitch_name, 'network=%s' % ip_address,
-                             'mac="%s"' % lrp_mac, '--','add','Logical_Router',
-                             lrouter_name, 'ports', '@lrp', '--', 'lport-add',
+        ip_address = netaddr.IPAddress(cidr.first + 1)
+        lrp_uuid = ovn_nbctl('--', '--id=@lrp', 'create',
+                             'Logical_Router_port',
+                             'name=%s' % lswitch_name,
+                             'network=%s' % ip_address,
+                             'mac="%s"' % lrp_mac, '--', 'add',
+                             'Logical_Router', lrouter_name, 'ports',
+                             '@lrp', '--', 'lport-add',
                              lswitch_name, 'rp-%s' % lswitch_name)
-        ovn_nbctl('set', 'Logical_port', 'rp-%s' % lswitch_name, 'type=router',
-                  'options:router-port=%s' % lswitch_name,
+        ovn_nbctl('set', 'Logical_port', 'rp-%s' % lswitch_name,
+                  'type=router', 'options:router-port=%s' % lswitch_name,
                   'addresses="%s"' % lrp_mac)
         LOG.debug("Configured logical router port: %s", lrp_uuid)
 
@@ -436,8 +409,8 @@ def _cni_del(container_id, network_config):
         raise OVNCNIException(110, message)
     try:
         ovs_vsctl("del-port", container_id[:15])
-    except Exception
-        message= "failed to delete OVS port (%s)" % veth_outside
+    except Exception:
+        message = "failed to delete OVS port (%s)" % veth_outside
         LOG.exception(message)
         raise OVNCNIException(111, message)
 
@@ -455,7 +428,7 @@ def cni_add(args):
         result = _cni_add(network_config, lswitch_name)
         LOG.info("Pod networking configured on container %s."
                  "OVN logical port: %s; IP address: %s",
-                (container_id, "TODO", result['ip_address'])
+                 (container_id, "TODO", result['ip_address']))
         _cni_output(result)
     except OVNCNIException as oce:
         print(oce.cni_error())
@@ -468,7 +441,7 @@ def cni_del():
         network_config = _parse_stdin()
         container_id = os.environ.get(CNI_CONTAINER_ID)
         LOG.debug("Network config from input: %s", network_config)
-         _cni_del(network_config)
+        _cni_del(network_config)
         LOG.info("Pod networking de-configured on container %s", container_id)
     except OVNCNIException as oce:
         print(oce.cni_error())
@@ -482,7 +455,8 @@ def parse_args():
 
     # Parser for init command (not a CNI command)
     parser_host_init = subparsers.add_parser('init')
-    parser_host_init.add_argument('--lrouter-name', default=DEFAULT_LROUTER_NAME)
+    parser_host_init.add_argument('--lrouter-name',
+                                  default=DEFAULT_LROUTER_NAME)
     parser_host_init.add_argument('--subnet', default=None)
     parser_host_init.set_defaults(func=init_host)
     # Parser for CNI ADD command
@@ -493,15 +467,6 @@ def parse_args():
     parser_cni_del.set_defaults(func=cni_del)
     args = parser.parse_args()
     args.func(args)
-        
-
-def alt_main():
-    # Talk to local docker daemon
-    parse_args()
-    docker_net = get_default_docker_network(dc)
-    bridge_name, subnet_cidr, subnet_gw = get_network_info(docker_net)
-    print ("Bridge Name:%s - Subnet:%s - Gateway:%s" %
-           (bridge_name, subnet_cidr, subnet_gw))
 
 
 def main():
@@ -513,7 +478,8 @@ def main():
     LOG.debug("CNI Command in environment: %s", cni_command)
     if cni_command:
         sys.argv = [sys.argv[0], cni_command] + sys.argv[1:]
-    LOG.info("ovn_cni plugin invoked with arguments:%s", ",".join(sys.argv[1:]))
+    LOG.info("ovn_cni plugin invoked with arguments:%s",
+             ",".join(sys.argv[1:]))
     # parse_args is also expected to launch the appropriate subcommand
     parse_args()
 
