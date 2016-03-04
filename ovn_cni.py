@@ -422,21 +422,40 @@ def init_host(args, network_config=None, check_local_switch=True):
         LOG.debug("Configured logical router port: %s", lrp_uuid)
 
 
+def _cni_del(container_id, network_config):
+    # Remove IP allocation
+    # Oh wait, we do not store them anyway, so why bother at all?
+    # Remove OVN ACLs...
+    # TODO: We might first want to have the code that adds them
+    # Remove OVN Logical port
+    try:
+        ovn_nbctl("lport-del", container_id)
+    except Exception:
+        message = "Unable to remove OVN logical port"
+        LOG.exception(message)
+        raise OVNCNIException(110, message)
+    try:
+        ovs_vsctl("del-port", container_id[:15])
+    except Exception
+        message= "failed to delete OVS port (%s)" % veth_outside
+        LOG.exception(message)
+        raise OVNCNIException(111, message)
+
+
 def cni_add(args):
     try:
         LOG.debug("Reading configuration on standard input")
         network_config = _parse_stdin()
+        container_id = os.environ.get(CNI_CONTAINER_ID)
         LOG.debug("Network config from input: %s", network_config)
         LOG.debug("Verifying host setup")
         lswitch_name = _check_host_vswitch(args)
         LOG.debug("Configuring pod networking on container %s",
-                  os.environ.get(CNI_CONTAINER_ID))
+                  container_id)
         result = _cni_add(network_config, lswitch_name)
         LOG.info("Pod networking configured on container %s."
                  "OVN logical port: %s; IP address: %s",
-                (os.environ.get(CNI_CONTAINER_ID),
-                 result['ip_address'],
-                 result['lport_uuid'])
+                (container_id, "TODO", result['ip_address'])
         _cni_output(result)
     except OVNCNIException as oce:
         print(oce.cni_error())
@@ -444,7 +463,16 @@ def cni_add(args):
 
 
 def cni_del():
-    pass
+    try:
+        LOG.debug("Reading configuration on standard input")
+        network_config = _parse_stdin()
+        container_id = os.environ.get(CNI_CONTAINER_ID)
+        LOG.debug("Network config from input: %s", network_config)
+         _cni_del(network_config)
+        LOG.info("Pod networking de-configured on container %s", container_id)
+    except OVNCNIException as oce:
+        print(oce.cni_error())
+        sys.exit(1)
 
 
 def parse_args():
