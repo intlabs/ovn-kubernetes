@@ -21,6 +21,8 @@ OVN_BRIDGE = "br-int"
 
 CNI_VERSION = "0.1.0"
 CNI_COMMAND = "CNI_COMMAND"
+CNI_CONTAINER_ID = "CNI_CONTAINERID"
+CNI_IFNAME = "CNI_IFNAME"
 CNI_NETNS = "CNI_NETNS"
 
 KUBELET_PORT = 10255
@@ -167,7 +169,7 @@ def _check_host_vswitch(args, network_config):
             # Log the exception but keep running. It is likely that pod
             # networking won't work but it's not a good reason for blocking
             # pod startup as networking can be fixed later on
-            LOG.Exception("Error while setting up OVN for K8S host")
+            LOG.exception("Error while setting up OVN for K8S host")
     return lswitch_name
 
 
@@ -227,7 +229,7 @@ def _setup_pod_interface(pid, container_id, dev, mac,
         raise OVNCNIException(103, "veth setup failure")
 
 
-def _cni_add(network_config, lswtitch_name):
+def _cni_add(network_config, lswitch_name):
     try:
         netns_dst = os.environ[CNI_NETNS]
         container_id = os.environ[CNI_CONTAINER_ID]
@@ -256,11 +258,6 @@ def _cni_add(network_config, lswtitch_name):
     LOG.debug("Container network namespace:%s", netns_dst)
     LOG.debug("Container ID: %s", container_id)
     LOG.debug("Chosen pod IP: %s", ip_address)
-
-    # LOG.debug("As for the env...")
-    # for k,v in os.environ.items():
-    #    LOG.debug("%s: %s", k, v)
-    # return
 
     # Create OVN logical port
     try:
@@ -418,11 +415,14 @@ def _cni_del(container_id, network_config):
 def cni_add(args):
     try:
         LOG.debug("Reading configuration on standard input")
+        LOG.debug("As for the env...")
+        for k,v in os.environ.items():
+           LOG.debug("%s: %s", k, v)
         network_config = _parse_stdin()
         container_id = os.environ.get(CNI_CONTAINER_ID)
         LOG.debug("Network config from input: %s", network_config)
         LOG.debug("Verifying host setup")
-        lswitch_name = _check_host_vswitch(args)
+        lswitch_name = _check_host_vswitch(args, network_config)
         LOG.debug("Configuring pod networking on container %s",
                   container_id)
         result = _cni_add(network_config, lswitch_name)
@@ -435,7 +435,7 @@ def cni_add(args):
         sys.exit(1)
 
 
-def cni_del():
+def cni_del(args):
     try:
         LOG.debug("Reading configuration on standard input")
         network_config = _parse_stdin()
