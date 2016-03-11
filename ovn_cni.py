@@ -190,32 +190,50 @@ def _setup_pod_interface(pid, container_id, dev, mac,
     try:
         veth_outside = container_id[:15]
         veth_inside = container_id[:13] + "_c"
+        LOG.debug("Creating veth pair for container %s", container_id)
         command = "ip link add %s type veth peer name %s" \
                   % (veth_outside, veth_inside)
         call_popen(shlex.split(command))
         # Up the outer interface
+        LOG.debug("Bringing up veth outer interface %s", veth_outside)
         command = "ip link set %s up" % veth_outside
         call_popen(shlex.split(command))
-        # Move the inner veth inside the container
+        # Create a link for the container namespace
+        netns_dst = "/var/run/netns/%s" % pid
+        if not os.path.isfile(netns_dst):
+            netns_src = "/proc/%s/ns/net" % pid
+            command = "ln -s %s %s" % (netns_src, netns_dst)
+            call_popen(shlex.split(command))
+        # Move the inner veth inside the container namespace
+        LOG.debug("Adding veth inner interface to namespace for container %s",
+                  container_id)
         command = "ip link set %s netns %s" % (veth_inside, pid)
         call_popen(shlex.split(command))
         # Change the name of veth_inside to $dev
+        LOG.debug("Renaming veth inner interface '%s' to '%s'",
+                  veth_inside, dev)
         command = "ip netns exec %s ip link set dev %s name %s" \
                   % (pid, veth_inside, dev)
         call_popen(shlex.split(command))
         # Up the inner interface
+        LOG.debug("Bringing veth inner interface '%s' up", dev)
         command = "ip netns exec %s ip link set %s up" % (pid, dev)
         call_popen(shlex.split(command))
         # Set the mtu to handle tunnels
+        LOG.debug("Adjusting veth interface '%s' MTU for tunneling to %d",
+                  dev, 1450)
         command = "ip netns exec %s ip link set dev %s mtu %s" \
                   % (pid, dev, 1450)
         call_popen(shlex.split(command))
         # Set the ip address
+        LOG.debug("Setting IP address for container:%s interface:%s",
+                  container_id, dev)
         command = "ip netns exec %s ip addr add %s/%s dev %s" \
                   % (pid, ip_address, prefixlen, dev)
         call_popen(shlex.split(command))
         # Set the mac address
-        LOG.debug("Setting MAC address for interface: %s", dev)
+        LOG.debug("Setting MAC address for container:%s interface:%s",
+                  container_id, dev)
         command = "ip netns exec %s ip link set dev %s address %s" \
                   % (pid, dec, mac)
         # Set the gateway
