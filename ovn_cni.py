@@ -313,7 +313,7 @@ def _cni_add(network_config, lswitch_name):
         'ip_address': ip_address,
         'gateway_ip': gateway_ip,
         'mac_address': mac,
-        'lport_uuid': lport_uuid}
+        'network': cidr}
 
     # REPLACE WITH THIRD PARTY RESOURCE
     # annotations = get_annotations(ns, pod_name)
@@ -327,9 +327,9 @@ def _cni_add(network_config, lswitch_name):
 
 def _cni_output(result):
     output = {'cniVersion': CNI_VERSION,
-              'ip4': {'ip': result['ip_address'],
-                      'gateway': result['gateway_ip']}
-              }
+              'ip4': {'ip': '%s/%s' % (result['ip_address'],
+                                       result['network'].prefixlen),
+                      'gateway': str(result['gateway_ip'])}}
     print json.dumps(output)
 
 
@@ -348,6 +348,7 @@ def init_host(args, network_config=None, check_local_switch=True):
         LOG.debug("Logical router for K8S networking found. "
                   "Skipping creation")
     else:
+        r
         LOG.debug("Creating Logical Router for K8S networking with name:%s",
                   lrouter_name)
         output = ovn_nbctl('create', 'Logical_Router',
@@ -446,7 +447,7 @@ def cni_add(args):
         result = _cni_add(network_config, lswitch_name)
         LOG.info("Pod networking configured on container %s."
                  "OVN logical port: %s; IP address: %s",
-                 (container_id, "TODO", result['ip_address']))
+                 container_id, "TODO", result['ip_address'])
         _cni_output(result)
     except OVNCNIException as oce:
         print(oce.cni_error())
@@ -459,7 +460,7 @@ def cni_del(args):
         network_config = _parse_stdin()
         container_id = os.environ.get(CNI_CONTAINER_ID)
         LOG.debug("Network config from input: %s", network_config)
-        _cni_del(network_config)
+        _cni_del(container_id, network_config)
         LOG.info("Pod networking de-configured on container %s", container_id)
     except OVNCNIException as oce:
         print(oce.cni_error())
