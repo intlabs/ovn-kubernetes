@@ -235,7 +235,7 @@ def _setup_pod_interface(pid, container_id, dev, mac,
         LOG.debug("Setting MAC address for container:%s interface:%s",
                   container_id, dev)
         command = "ip netns exec %s ip link set dev %s address %s" \
-                  % (pid, dec, mac)
+                  % (pid, dev, mac)
         # Set the gateway
         command = "ip netns exec %s ip route add default via %s" \
                   % (pid, gateway_ip)
