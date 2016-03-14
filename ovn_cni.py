@@ -446,8 +446,6 @@ def cni_add(args):
     try:
         LOG.debug("Reading configuration on standard input")
         LOG.debug("As for the env...")
-        for k,v in os.environ.items():
-           LOG.debug("%s: %s", k, v)
         network_config = _parse_stdin()
         container_id = os.environ.get(CNI_CONTAINER_ID)
         LOG.debug("Network config from input: %s", network_config)
