@@ -24,6 +24,8 @@ CNI_COMMAND = "CNI_COMMAND"
 CNI_CONTAINER_ID = "CNI_CONTAINERID"
 CNI_IFNAME = "CNI_IFNAME"
 CNI_NETNS = "CNI_NETNS"
+CNI_ARGS = "CNI_ARGS"
+K8S_POD_NAME = "K8S_POD_NAME"
 
 KUBELET_PORT = 10255
 
@@ -251,6 +253,10 @@ def _cni_add(network_config, lswitch_name):
     try:
         netns_dst = os.environ[CNI_NETNS]
         container_id = os.environ[CNI_CONTAINER_ID]
+        cni_args_str = os.environ[CNI_ARGS]
+        # CNI_ARGS has the format key=value;key2=value2;...
+        cni_args = dict(item.split('=') for item in cni_args_str.split(';'))
+        pod_name = cni_args[K8S_POD_NAME]
         dev = os.environ.get(CNI_IFNAME, 'eth0')
         pid_match = re.match("^/proc/(.\d*)/ns/net$", netns_dst)
         if not pid_match:
@@ -278,6 +284,7 @@ def _cni_add(network_config, lswitch_name):
     LOG.debug("Chosen pod IP: %s", ip_address)
 
     # Create OVN logical port
+    # TODO: This should use the OVSDB transact capability.
     try:
         # Create logical port
         LOG.debug("Creating logical port on switch %s for container %s",
@@ -288,6 +295,10 @@ def _cni_add(network_config, lswitch_name):
                   mac, ip_address)
         ovn_nbctl('lport-set-addresses', container_id,
                   '"%s %s"' % (mac, ip_address))
+        # Store pod name in port's external ids in order to keep track of the
+        # association between pod and logical port
+        ovn_nbctl('set', 'Logical_port', container_id,
+                  'external_ids:k8s_pod_name=%s' % pod_name)
     except Exception:
         LOG.exception("Unable to configure OVN logical port for pod on "
                       "lswitch %s", lswitch_name)
