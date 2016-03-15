@@ -130,5 +130,5 @@ CNI plugin
 
 There is also a CNI plugin which enables OVN as a networking backend for
 Kubernetes, currently in *Overlay mode* only.
-More details can be found [here](../README_cni.md).
+More details can be found [here](./README_cni.md).
 

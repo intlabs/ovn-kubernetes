@@ -1,5 +1,5 @@
 OVN CNI plugin 
-----------------
+==============
 
 The `ovn_cni.py` script partially implements the Container Network Interface,
 providing a plugin for the 'main' interface - i.e.: the one responsible for
@@ -10,7 +10,6 @@ provides a very rough IPAM solution which is not recommended at all for
 production deployments.
 
 OVN logical network topology
-=============================
 
 This CNI plugin build a rather simple OVN topology. Each node is assumed to
 have a distinct, dedicated logical switch and IP subnet, which shall be
@@ -20,7 +19,7 @@ Every node switch is then connected to a OVN logical router, thus enabling
 L3 forwarding across all logical switches.
 
 Host Initialization
-====================
+--------------------
 
 Initialization can be performed by invoking the command *init* on the plugin
 script:
@@ -60,7 +59,7 @@ initialized with different defaults, this behaviour will be discontinued.
 
 
 Adding a container to a network
-================================
+-------------------------------
 
 The CNI ADD operation performs the following operations:
 
@@ -83,16 +82,13 @@ The CNI ADD operation performs the following operations:
    bridge (which for this plugin is always `br-int`)
 
 
-Kubernetes specifics
-~~~~~~~~~~~~~~~~~~~~~
-
 The plugin stores the Kubernetes pod name in the *external_ids* attribute of
 the OVN Logical Port. The key for the pod is *k8s_pod_name*. This information
 will be leveraged when applying ACLs to the OVN logical port.
 
 
 Removing a container from a network
-===================================
+-----------------------------------
 
 The CNI DEL operation takes care of removing the veth interfaces for the
 container (the pod infra container in the Kubernetes case), and destroying
@@ -104,7 +100,7 @@ be done about this.
 
 
 Securing containers
-====================
+-------------------
 
 This section concern an experimental implementation of the proposed 
 [Network Isolation Policies](https://docs.google.com/document/d/1qAm-_oSap-f1d6a-xRTj6xaH1sYQBfK36VyjB5XOZug)
