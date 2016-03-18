@@ -26,6 +26,7 @@ CNI_IFNAME = "CNI_IFNAME"
 CNI_NETNS = "CNI_NETNS"
 CNI_ARGS = "CNI_ARGS"
 K8S_POD_NAME = "K8S_POD_NAME"
+K8S_POD_NAMESPACE = "K8S_POD_NAMESPACE"
 
 KUBELET_PORT = 10255
 
@@ -175,9 +176,9 @@ def _check_host_vswitch(args, network_config):
     return lswitch_name
 
 
-def _setup_pod_interface(pid, container_id, dev, mac,
-                         ip_address, prefixlen, gateway_ip):
-    """Configure veth pair for pod
+def _setup_interface(pid, container_id, dev, mac,
+                     ip_address, prefixlen, gateway_ip):
+    """Configure veth pair for container
 
     :param pid: pod's infra container pid.
     :param container_id: pod's infra container docker id
@@ -249,25 +250,7 @@ def _setup_pod_interface(pid, container_id, dev, mac,
         raise OVNCNIException(103, "veth setup failure")
 
 
-def _cni_add(network_config, lswitch_name):
-    try:
-        netns_dst = os.environ[CNI_NETNS]
-        container_id = os.environ[CNI_CONTAINER_ID]
-        cni_args_str = os.environ[CNI_ARGS]
-        # CNI_ARGS has the format key=value;key2=value2;...
-        cni_args = dict(item.split('=') for item in cni_args_str.split(';'))
-        pod_name = cni_args[K8S_POD_NAME]
-        dev = os.environ.get(CNI_IFNAME, 'eth0')
-        pid_match = re.match("^/proc/(.\d*)/ns/net$", netns_dst)
-        if not pid_match:
-            raise OVNCNIException(
-                103, "Unable to extract container pid from namespace")
-        pid = pid_match.groups()[0]
-        cidr = netaddr.IPNetwork(network_config['ipam']['subnet'])
-        mac = _generate_mac()
-    except KeyError:
-        raise OVNCNIException(102, 'Required CNI variables missing')
-
+def _generate_container_ip(cidr):
     # The ultra poor man's IPAM.
     # TODO: store at least used ips somewhere
     try:
@@ -275,15 +258,14 @@ def _cni_add(network_config, lswitch_name):
         ip_address = netaddr.IPAddress(random.randint(
             cidr.first + 2, cidr.last - 1))
         gateway_ip = netaddr.IPAddress(cidr.first + 1)
+        return ip_address, gateway_ip
     except Exception:
         LOG.exception("Error while generating IP adress from CIDR:%s", cidr)
         raise OVNCNIException(104, "Failure while generating pod IP address")
 
-    LOG.debug("Container network namespace:%s", netns_dst)
-    LOG.debug("Container ID: %s", container_id)
-    LOG.debug("Chosen pod IP: %s", ip_address)
 
-    # Create OVN logical port
+def _create_ovn_logical_port(lswitch_name, container_id, mac,
+                             ip_address, pod_name, ns_name=None):
     # TODO: This should use the OVSDB transact capability.
     try:
         # Create logical port
@@ -295,17 +277,56 @@ def _cni_add(network_config, lswitch_name):
                   mac, ip_address)
         ovn_nbctl('lport-set-addresses', container_id,
                   '"%s %s"' % (mac, ip_address))
-        # Store pod name in port's external ids in order to keep track of the
-        # association between pod and logical port
-        ovn_nbctl('set', 'Logical_port', container_id,
-                  'external_ids:k8s_pod_name=%s' % pod_name)
+        # Store pod name and, if provided, the namespace name in port's
+        # external ids in order to keep track of the association between
+        # pod and logical port
+        if ns_name:
+            ovn_nbctl('set', 'Logical_port', container_id,
+                      'external_ids:k8s_pod_name=%s' % pod_name,
+                      'external_ids:k8s_ns_name=%s' % ns_name)
+        else:
+            ovn_nbctl('set', 'Logical_port', container_id,
+                      'external_ids:k8s_pod_name=%s' % pod_name)
     except Exception:
         LOG.exception("Unable to configure OVN logical port for pod on "
                       "lswitch %s", lswitch_name)
         raise OVNCNIException(105, "Failure while setting up OVN logical port")
 
+
+def _cni_add(network_config, lswitch_name):
+    try:
+        netns_dst = os.environ[CNI_NETNS]
+        container_id = os.environ[CNI_CONTAINER_ID]
+        cni_args_str = os.environ[CNI_ARGS]
+        # CNI_ARGS has the format key=value;key2=value2;...
+        cni_args = dict(item.split('=') for item in cni_args_str.split(';'))
+        pod_name = cni_args[K8S_POD_NAME]
+        # Not sure whether K8S_POD_NAMESPACE is an 'official' CNI arg
+        ns_name = cni_args.get(K8S_POD_NAMESPACE)
+        dev = os.environ.get(CNI_IFNAME, 'eth0')
+        pid_match = re.match("^/proc/(.\d*)/ns/net$", netns_dst)
+        if not pid_match:
+            raise OVNCNIException(
+                103, "Unable to extract container pid from namespace")
+        pid = pid_match.groups()[0]
+        cidr = netaddr.IPNetwork(network_config['ipam']['subnet'])
+        mac = _generate_mac()
+    except KeyError:
+        raise OVNCNIException(102, 'Required CNI variables missing')
+
+    # Generate container IP
+    ip_address, gateway_ip = _generate_container_ip(cidr)
+
+    LOG.debug("Container network namespace:%s", netns_dst)
+    LOG.debug("Container ID: %s", container_id)
+    LOG.debug("Chosen pod IP: %s", ip_address)
+
+    # Create OVN logical port
+    _create_ovn_logical_port(lswitch_name, container_id, mac,
+                             ip_address, pod_name, ns_name)
+
     # Configure the veth pair for the pod
-    veth_inside, veth_outside = _setup_pod_interface(
+    veth_inside, veth_outside = _setup_interface(
         pid, container_id, dev, mac, ip_address, cidr.prefixlen, gateway_ip)
 
     # Add the port to a OVS bridge and set the vlan
@@ -325,15 +346,6 @@ def _cni_add(network_config, lswitch_name):
         'gateway_ip': gateway_ip,
         'mac_address': mac,
         'network': cidr}
-
-    # REPLACE WITH THIRD PARTY RESOURCE
-    # annotations = get_annotations(ns, pod_name)
-    # if annotations:
-    #    security_group = annotations.get("security-group", "")
-    #    if security_group:
-    #        associate_security_group(lport, security_group)
-
-    #    random.seed()
 
 
 def _cni_output(result):
