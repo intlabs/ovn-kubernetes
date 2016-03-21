@@ -30,6 +30,8 @@ K8S_POD_NAMESPACE = "K8S_POD_NAMESPACE"
 
 KUBELET_PORT = 10255
 
+DEFAULT_ACL_PRIORITY = 1001
+
 
 def call_popen(cmd):
     child = subprocess.Popen(cmd, stdout=subprocess.PIPE)
@@ -269,6 +271,12 @@ def _create_ovn_logical_port(lswitch_name, container_id, mac,
                   mac, ip_address)
         ovn_nbctl('lport-set-addresses', container_id,
                   '"%s %s"' % (mac, ip_address))
+        # Block all ingress traffic
+        # TODO: also block egress if Kubernetes network policy allow to
+        # discipline it
+        LOG.debug("Adding drop-all ACL for port %s", container_id)
+        ovn_nbctl('acl-add', lswitch_name, 'to_lport', DEFAULT_ACL_PRIORITY,
+                  'outport == "%s" && ip' % container_id, "drop")
         # Store pod name and, if provided, the namespace name in port's
         # external ids in order to keep track of the association between
         # pod and logical port
