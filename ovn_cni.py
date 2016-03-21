@@ -161,18 +161,10 @@ def _check_vswitch(lswitch_name):
 
 
 def _check_host_vswitch(args, network_config):
-    # Check for host logical switch. If not found trigger host
-    # initialization process
+    # Check for host logical switch
     lswitch_name = _get_host_lswitch_name()
     if not _check_vswitch(lswitch_name):
-        try:
-            init_host(args, network_config=network_config,
-                      check_local_vswitch=False)
-        except Exception:
-            # Log the exception but keep running. It is likely that pod
-            # networking won't work but it's not a good reason for blocking
-            # pod startup as networking can be fixed later on
-            LOG.exception("Error while setting up OVN for K8S host")
+        raise OVNCNIException(199, "Node OVN logical switch not configured")
     return lswitch_name
 
 
@@ -480,6 +472,8 @@ def cni_del(args):
         LOG.debug("Reading configuration on standard input")
         network_config = _parse_stdin()
         container_id = os.environ.get(CNI_CONTAINER_ID)
+        LOG.debug("Verifying host setup")
+        _check_host_vswitch(args, network_config)
         LOG.debug("Network config from input: %s", network_config)
         _cni_del(container_id, network_config)
         LOG.info("Pod networking de-configured on container %s", container_id)
