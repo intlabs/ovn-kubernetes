@@ -275,8 +275,16 @@ def _create_ovn_logical_port(lswitch_name, container_id, mac,
         # TODO: also block egress if Kubernetes network policy allow to
         # discipline it
         LOG.debug("Adding drop-all ACL for port %s", container_id)
-        ovn_nbctl('acl-add', lswitch_name, 'to_lport', DEFAULT_ACL_PRIORITY,
-                  'outport == "%s" && ip' % container_id, "drop")
+        # Note: The reason rather complicated expression is to be able to set
+        # an external id for the ACL as well (acl-add won't return the ACL id)
+        ovn_nbctl('--', '--id=@acl_id', 'create', 'ACL', 'action=drop',
+                  'direction=to-lport', 'priority=%d' % DEFAULT_ACL_PRIORITY,
+                  "match='outport\=\=\"%s\"\ &&\ ip'" % container_id,
+                  'external_ids:lport_name=%s' % container_id,
+                  'external_ids:pod_name=%s' % pod_name, '--',
+                  'add', 'Logical_Switch', lswitch_name, 'acls', '@acl_id')
+        # Sore the port name and the kubernetes pod name in the ACL's external
+        # IDs. This will make retrieval easier
         # Store pod name and, if provided, the namespace name in port's
         # external ids in order to keep track of the association between
         # pod and logical port
@@ -449,7 +457,7 @@ def _cni_del(container_id, network_config):
     try:
         ovs_vsctl("del-port", container_id[:15])
     except Exception:
-        message = "failed to delete OVS port (%s)" % veth_outside
+        message = "failed to delete OVS port %s" % container_id[:15]
         LOG.exception(message)
         raise OVNCNIException(111, message)
 
