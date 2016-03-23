@@ -18,6 +18,18 @@ described in a CNI network configuration file.
 Every node switch is then connected to a OVN logical router, thus enabling
 L3 forwarding across all logical switches.
 
+Plugin installation
+--------------------
+
+If installed via pip or setup.py the CNI plugin should be in your path:
+
+```
+which ovn_cni
+```
+
+In order to use it with Kubernetes create a symbolic link to this script
+to Kubernetes CNI plugin directory - usually /opt/cni/bin
+
 Host Initialization
 --------------------
 
@@ -50,12 +62,6 @@ The logic for the logical node switch is currently very kubernetes-dependent.
 Indeed it assumes that a `kubelet` is running on the same node and uses the
 kubelet introspection API to fetch the node machine ID, which is then used as
 the name for the node logical switch.
-
-The plugin currently also has the ability of do all the initial configuration
-automatically the first time a container is added or deleted. In that case
-the node CIDR will be retrieved from the CNI network configuration passed to
-the plugin; as this might cause unexpected issues if the plugin was already
-initialized with different defaults, this behaviour will be discontinued.
 
 
 Adding a container to a network
