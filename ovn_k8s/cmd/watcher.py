@@ -15,10 +15,12 @@ LOG = log.getLogger(__name__)
 def _init_conf():
     # Register options
     watcher_opts = [
-        cfg.StrOpt('k8s_api_server_host', default='192.168.0.54'),
-        cfg.IntOpt('k8s_api_server_port', default='8080')]
+        cfg.StrOpt('k8s_api_server_host', default='127.0.0.1'),
+        cfg.IntOpt('k8s_api_server_port', default='8080'),
+        cfg.StrOpt('ovn_remote', default='unix:/var/run/openvswitch/db.sock')]
     cfg.CONF.register_opts(watcher_opts)
     cfg.CONF(args=sys.argv[1:], project='ovn-k8s')
+
 
 def main():
     log.register_options(cfg.CONF)

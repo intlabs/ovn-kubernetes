@@ -1,10 +1,10 @@
-import logging
 import subprocess
-import sys
 
 from oslo_config import cfg
 from oslo_log import log
 import requests
+
+from ovn_k8s.lib import ovn
 
 LOG = log.getLogger(__name__)
 
@@ -14,59 +14,7 @@ K8S_ISOLATION_ANN = 'net.alpha.kubernetes.io/network-isolation'
 
 DEFAULT_ACL_PRIORITY = 1001
 
-# TODO: Remove code duplication
-
-
-def call_popen(cmd):
-    child = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-    output = child.communicate()
-    if child.returncode:
-        raise RuntimeError("Fatal error executing %s" % " ".join(cmd))
-    if not output or not output[0]:
-        output = ""
-    else:
-        output = output[0].strip()
-    return output
-
-
-def call_prog(args):
-    cmd = (args[0], "--timeout=5", "-vconsole:off") + args[1:]
-    return call_popen(cmd)
-
-
-def ovs_vsctl(*args):
-    return call_prog(("ovs-vsctl",) + args)
-
-
-def ovn_nbctl(*args):
-    # MOTE: this only works if northbound DB is on local host
-    args = ('ovn-nbctl', ) + args
-    return call_prog(args)
-
-
-def parse_ovn_nbctl_output(data, scalar=False):
-    # Simply use _uuid as a separator between elements assuming it always
-    # is the first element returned by ovn-nbctl
-    items = []
-    item = {}
-    for line in data.split('\n'):
-        if not line:
-            continue
-        # This is very rough at some point I'd like to stop shelling out
-        # to ovn-nbctl
-        if line.startswith('_uuid'):
-            if item:
-                if scalar:
-                    return item
-                items.append(item.copy())
-                item = {}
-        item[line.split(':')[0].strip()] = line.split(':')[-1].strip()
-    # append last item
-    if item:
-        if scalar:
-            return item
-        items.append(item)
-    return items
+# TODO(me): Remove remaining code duplication
 
 
 def _build_external_ids_dict(ext_id_str):
@@ -78,12 +26,12 @@ def _build_external_ids_dict(ext_id_str):
 
 
 def _get_ns_annotations(api_server, api_port, namespace):
-    # TODO: https and authentication
+    # TODO(me): https and authentication
     url = ("http://%s:%d/api/v1/namespaces/%s" %
            (api_server, api_port, namespace))
     response = requests.get(url)
     if not response or response.status_code != 200:
-        # TODO: raise here
+        # TODO(me): raise here
         return
     json_response = response.json()
     annotations = json_response['metadata'].get('annotations')
@@ -103,17 +51,6 @@ def _is_namespace_isolated(namespace):
         return False
 
 
-def _create_ovn_acl(ls_name, pod_name, lport_name, acl):
-    # Note: The reason rather complicated expression is to be able to set
-    # an external id for the ACL as well (acl-add won't return the ACL id)
-    ovn_nbctl('--', '--id=@acl_id', 'create', 'ACL', 'action=%s' % acl[2],
-              'direction=to-lport', 'priority=%d' % acl[0],
-              'match="%s"' % acl[1],
-              'external_ids:lport_name=%s' % lport_name,
-              'external_ids:pod_name=%s' % pod_name, '--',
-              'add', 'Logical_Switch', ls_name, 'acls', '@acl_id')
-
-
 def _process_ovn_db_change(row, action, external_ids):
     pod_name = external_ids[K8S_POD_NAME]
     pod_ns = external_ids.get(K8S_POD_NAMESPACE, 'default')
@@ -131,28 +68,30 @@ def _process_ovn_db_change(row, action, external_ids):
         # Do policies only if isolation is on
         LOG.debug("Retrieving policies in namespace ... for pod %s", pod_name)
         LOG.debug("Fetching IP address for Pods in from clause")
-    # TODO: Program ACLs without leaving even a fraction of second in which
-    # the container is not secured
+    # TODO(me): Program ACLs without leaving even a fraction of second in
+    # which the container is not secured
     # Find lswitch for port
-    ls_data_raw = ovn_nbctl('find', 'Logical_Switch', 'ports{>=}%s' % row)
-    ls_data = parse_ovn_nbctl_output(ls_data_raw)
+    ls_data_raw = ovn.ovn_nbctl('find', 'Logical_Switch', 'ports{>=}%s' % row)
+    ls_data = ovn.parse_ovn_nbctl_output(ls_data_raw)
     ls_data = ls_data[0]
     ls_name = ls_data['name'].strip('"')
-    current_acls_raw = ovn_nbctl('find', 'ACL',
-                                 'external_ids:pod_name=%s' % pod_name)
-    current_acls = parse_ovn_nbctl_output(current_acls_raw)
+    current_acls_raw = ovn.ovn_nbctl('find', 'ACL',
+                                     'external_ids:pod_name=%s' % pod_name)
+    current_acls = ovn.parse_ovn_nbctl_output(current_acls_raw)
     LOG.debug("Implementing OVN ACLS for pod %s on lswitch %s",
               pod_name, ls_name)
     LOG.debug("Removing existing ACLS for pod %s on lswitch %s",
               pod_name, ls_name)
     for acl in acls:
-        _create_ovn_acl(ls_name, pod_name, row, acl)
+        ovn.create_ovn_acl(ls_name, pod_name, row, *acl)
     for acl in current_acls:
-        ovn_nbctl('remove', 'Logical_Switch', ls_name, 'acls', acl['_uuid'])
+        ovn.ovn_nbctl('remove', 'Logical_Switch', ls_name,
+                      'acls', acl['_uuid'])
     LOG.info("ACLs for Pod: %s configured", pod_name)
 
 
 def ovn_watcher():
+    """Monitor changes in OVN NB DB."""
     LOG.info("Monitoring OVN Northbound DB")
     proc = subprocess.Popen(['sudo', 'ovsdb-client', 'monitor',
                              'OVN_Northbound', 'Logical_Port'],
@@ -173,8 +112,10 @@ def ovn_watcher():
 
 
 def k8s_ns_watcher():
+    """Monitor changes in namespace isolation annotations."""
     LOG.info("Monitoring Kubernetes Namespaces")
 
 
 def k8s_nw_policy_watcher():
+    """Monitor network policy changes."""
     LOG.info("Monitoring Kubernetes Network Policies")

@@ -3,15 +3,18 @@ import argparse
 import json
 import netaddr
 import os
-import re
 import random
+import re
 import requests
 import shlex
-import subprocess
 import sys
 
 from oslo_config import cfg
 from oslo_log import log
+
+from ovn_k8s.lib import ovn
+from ovn_k8s import utils
+
 
 LOGFILE = 'ovn_cni.log'
 LOG = log.getLogger(__name__)
@@ -31,73 +34,6 @@ K8S_POD_NAMESPACE = "K8S_POD_NAMESPACE"
 KUBELET_PORT = 10255
 
 DEFAULT_ACL_PRIORITY = 1001
-
-
-def call_popen(cmd):
-    child = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-    output = child.communicate()
-    if child.returncode:
-        raise RuntimeError("Fatal error executing %s" % " ".join(cmd))
-    if not output or not output[0]:
-        output = ""
-    else:
-        output = output[0].strip()
-    return output
-
-
-def call_prog(args):
-    cmd = (args[0], "--timeout=5", "-vconsole:off") + args[1:]
-    return call_popen(cmd)
-
-
-def ovs_vsctl(*args):
-    return call_prog(("ovs-vsctl",) + args)
-
-
-def get_ovn_remote():
-    if not get_ovn_remote.location:
-        try:
-            get_ovn_remote.location = ovs_vsctl(
-                "get", "Open_vSwitch", ".",
-                "external_ids:ovn-remote").strip('"')
-        except Exception as e:
-            # TODO: custom exceptions
-            raise Exception("Unable to find a location for the "
-                            "OVN NorthBound DB:%s" % e)
-    return get_ovn_remote.location
-get_ovn_remote.location = None
-
-
-def ovn_nbctl(*args):
-    ovn_remote = get_ovn_remote()
-    db_option = "%s=%s" % ("--db", ovn_remote)
-    args = ('ovn-nbctl', db_option) + args
-    return call_prog(args)
-
-
-def parse_ovn_nbctl_output(data, scalar=False):
-    # Simply use _uuid as a separator between elements assuming it always
-    # is the first element returned by ovn-nbctl
-    items = []
-    item = {}
-    for line in data.split('\n'):
-        if not line:
-            continue
-        # This is very rough at some point I'd like to stop shelling out
-        # to ovn-nbctl
-        if line.startswith('_uuid'):
-            if item:
-                if scalar:
-                    return item
-                items.appen(item.copy())
-                item = {}
-        item[line.split(':')[0].strip()] = line.split(':')[-1].strip()
-    # append last item
-    if item:
-        if scalar:
-            return item
-        items.append(item)
-    return items
 
 
 class OVNCNIException(Exception):
@@ -149,9 +85,9 @@ def _get_host_lswitch_name():
 
 def _check_vswitch(lswitch_name):
     LOG.info("OVN lswitch for the host: %s", lswitch_name)
-    lswitch_raw_data = ovn_nbctl('find', 'Logical_Switch',
-                                 'name=%s' % lswitch_name)
-    lswitch_data = parse_ovn_nbctl_output(lswitch_raw_data)
+    lswitch_raw_data = ovn.ovn_nbctl('find', 'Logical_Switch',
+                                     'name=%s' % lswitch_name)
+    lswitch_data = ovn.parse_ovn_nbctl_output(lswitch_raw_data)
     if len(lswitch_data) > 1:
         LOG.warn("I really was not expecting more than one switch... I'll "
                  "pick the first, there's a %.2f\% chance I'll get it right" %
@@ -190,44 +126,44 @@ def _setup_interface(pid, container_id, dev, mac,
         LOG.debug("Creating veth pair for container %s", container_id)
         command = "ip link add %s type veth peer name %s" \
                   % (veth_outside, veth_inside)
-        call_popen(shlex.split(command))
+        utils.call_popen(shlex.split(command))
         # Up the outer interface
         LOG.debug("Bringing up veth outer interface %s", veth_outside)
         command = "ip link set %s up" % veth_outside
-        call_popen(shlex.split(command))
+        utils.call_popen(shlex.split(command))
         # Create a link for the container namespace
         netns_dst = "/var/run/netns/%s" % pid
         if not os.path.isfile(netns_dst):
             netns_src = "/proc/%s/ns/net" % pid
             command = "ln -s %s %s" % (netns_src, netns_dst)
-            call_popen(shlex.split(command))
+            utils.call_popen(shlex.split(command))
         # Move the inner veth inside the container namespace
         LOG.debug("Adding veth inner interface to namespace for container %s",
                   container_id)
         command = "ip link set %s netns %s" % (veth_inside, pid)
-        call_popen(shlex.split(command))
+        utils.call_popen(shlex.split(command))
         # Change the name of veth_inside to $dev
         LOG.debug("Renaming veth inner interface '%s' to '%s'",
                   veth_inside, dev)
         command = "ip netns exec %s ip link set dev %s name %s" \
                   % (pid, veth_inside, dev)
-        call_popen(shlex.split(command))
+        utils.call_popen(shlex.split(command))
         # Up the inner interface
         LOG.debug("Bringing veth inner interface '%s' up", dev)
         command = "ip netns exec %s ip link set %s up" % (pid, dev)
-        call_popen(shlex.split(command))
+        utils.call_popen(shlex.split(command))
         # Set the mtu to handle tunnels
         LOG.debug("Adjusting veth interface '%s' MTU for tunneling to %d",
                   dev, 1450)
         command = "ip netns exec %s ip link set dev %s mtu %s" \
                   % (pid, dev, 1450)
-        call_popen(shlex.split(command))
+        utils.call_popen(shlex.split(command))
         # Set the ip address
         LOG.debug("Setting IP address for container:%s interface:%s",
                   container_id, dev)
         command = "ip netns exec %s ip addr add %s/%s dev %s" \
                   % (pid, ip_address, prefixlen, dev)
-        call_popen(shlex.split(command))
+        utils.call_popen(shlex.split(command))
         # Set the mac address
         LOG.debug("Setting MAC address for container:%s interface:%s",
                   container_id, dev)
@@ -236,7 +172,7 @@ def _setup_interface(pid, container_id, dev, mac,
         # Set the gateway
         command = "ip netns exec %s ip route add default via %s" \
                   % (pid, gateway_ip)
-        call_popen(shlex.split(command))
+        utils.call_popen(shlex.split(command))
         return veth_inside, veth_outside
     except Exception:
         # TODO: cleanup
@@ -265,36 +201,34 @@ def _create_ovn_logical_port(lswitch_name, container_id, mac,
         # Create logical port
         LOG.debug("Creating logical port on switch %s for container %s",
                   lswitch_name, container_id)
-        ovn_nbctl('lport-add', lswitch_name, container_id)
+        ovn.ovn_nbctl('lport-add', lswitch_name, container_id)
         # Set the ip address and mac address
         LOG.debug("Setting up MAC (%s) and IP (%s) addresses for logical port",
                   mac, ip_address)
-        ovn_nbctl('lport-set-addresses', container_id,
-                  '"%s %s"' % (mac, ip_address))
+        ovn.ovn_nbctl('lport-set-addresses', container_id,
+                      '"%s %s"' % (mac, ip_address))
         # Block all ingress traffic
         # TODO: also block egress if Kubernetes network policy allow to
         # discipline it
         LOG.debug("Adding drop-all ACL for port %s", container_id)
         # Note: The reason rather complicated expression is to be able to set
         # an external id for the ACL as well (acl-add won't return the ACL id)
-        ovn_nbctl('--', '--id=@acl_id', 'create', 'ACL', 'action=drop',
-                  'direction=to-lport', 'priority=%d' % DEFAULT_ACL_PRIORITY,
-                  "match='outport\=\=\"%s\"\ &&\ ip'" % container_id,
-                  'external_ids:lport_name=%s' % container_id,
-                  'external_ids:pod_name=%s' % pod_name, '--',
-                  'add', 'Logical_Switch', lswitch_name, 'acls', '@acl_id')
+        ovn.create_ovn_acl(lswitch_name, pod_name, container_id,
+                           DEFAULT_ACL_PRIORITY,
+                           'outport\=\=\"%s\"\ &&\ ip' % container_id,
+                           'drop')
         # Sore the port name and the kubernetes pod name in the ACL's external
         # IDs. This will make retrieval easier
         # Store pod name and, if provided, the namespace name in port's
         # external ids in order to keep track of the association between
         # pod and logical port
         if ns_name:
-            ovn_nbctl('set', 'Logical_port', container_id,
-                      'external_ids:k8s_pod_name=%s' % pod_name,
-                      'external_ids:k8s_ns_name=%s' % ns_name)
+            ovn.ovn_nbctl('set', 'Logical_port', container_id,
+                          'external_ids:k8s_pod_name=%s' % pod_name,
+                          'external_ids:k8s_ns_name=%s' % ns_name)
         else:
-            ovn_nbctl('set', 'Logical_port', container_id,
-                      'external_ids:k8s_pod_name=%s' % pod_name)
+            ovn.ovn_nbctl('set', 'Logical_port', container_id,
+                          'external_ids:k8s_pod_name=%s' % pod_name)
     except Exception:
         LOG.exception("Unable to configure OVN logical port for pod on "
                       "lswitch %s", lswitch_name)
@@ -339,14 +273,14 @@ def _cni_add(network_config, lswitch_name):
 
     # Add the port to a OVS bridge and set the vlan
     try:
-        ovs_vsctl('add-port', OVN_BRIDGE, veth_outside,  '--', 'set',
-                  'interface', veth_outside,
-                  'external_ids:attached_mac=%s' % mac,
-                  'external_ids:iface-id=%s' % container_id,
-                  'external_ids:ip_address=%s' % ip_address)
+        ovn.ovs_vsctl('add-port', OVN_BRIDGE, veth_outside,  '--', 'set',
+                      'interface', veth_outside,
+                      'external_ids:attached_mac=%s' % mac,
+                      'external_ids:iface-id=%s' % container_id,
+                      'external_ids:ip_address=%s' % ip_address)
     except Exception:
         LOG.exception("Unable to plug interface into OVN bridge")
-        ovn_nbctl("lport-del", container_id)
+        ovn.ovn_nbctl("lport-del", container_id)
         raise OVNCNIException(106, "Failure in plugging pod interface")
 
     return {
@@ -361,15 +295,15 @@ def _cni_output(result):
               'ip4': {'ip': '%s/%s' % (result['ip_address'],
                                        result['network'].prefixlen),
                       'gateway': str(result['gateway_ip'])}}
-    print json.dumps(output)
+    print(json.dumps(output))
 
 
-def init_host(args, network_config=None, check_local_switch=True):
+def init_host(args, network_config=None):
     # Check for logical router, if not found create one
     lrouter_name = args.lrouter_name
-    lrouter_raw_data = ovn_nbctl('find', 'Logical_Router',
-                                 'name=%s' % lrouter_name)
-    lrouter_data = parse_ovn_nbctl_output(lrouter_raw_data)
+    lrouter_raw_data = ovn.ovn_nbctl('find', 'Logical_Router',
+                                     'name=%s' % lrouter_name)
+    lrouter_data = ovn.parse_ovn_nbctl_output(lrouter_raw_data)
     if len(lrouter_data) > 1:
         LOG.warn("I really was not expecting more than one router... I'll "
                  "pick the first, there's a %.2f\% chance I'll get it right",
@@ -379,25 +313,22 @@ def init_host(args, network_config=None, check_local_switch=True):
         LOG.debug("Logical router for K8S networking found. "
                   "Skipping creation")
     else:
-        r
         LOG.debug("Creating Logical Router for K8S networking with name:%s",
                   lrouter_name)
-        output = ovn_nbctl('create', 'Logical_Router',
-                           'name=%s' % lrouter_name)
+        output = ovn.ovn_nbctl('create', 'Logical_Router',
+                               'name=%s' % lrouter_name)
         LOG.debug("Will use OVN Logical Router:%s", output)
 
     # Check for host logical switch. If not found create one
     lswitch_name = _get_host_lswitch_name()
     LOG.info("OVN lswitch for the host: %s", lswitch_name)
-    lswitch_data = None
-    if _check_local_vswitch:
-        lswitch_data = _check_vswitch(lswitch_name)
+    lswitch_data = _check_vswitch(lswitch_name)
     if lswitch_data:
         LOG.debug("OVN Logical Switch for K8S host found. Skipping creation")
     else:
         LOG.debug("Creating LogicalSwitch for K8S host with name: %s",
                   lswitch_name)
-        ovn_nbctl('lswitch-add', lswitch_name)
+        ovn.ovn_nbctl('lswitch-add', lswitch_name)
 
     if network_config:
         # Grab subnet from nework config
@@ -412,9 +343,9 @@ def init_host(args, network_config=None, check_local_switch=True):
     # Check for logical router port connecting local logical switch to
     # kubernetes router.
     # If not found create one, and connect it to both router and switch
-    lrp_raw_data = ovn_nbctl('find', 'Logical_Router_port',
-                             'name=%s' % lswitch_name)
-    lrp_data = parse_ovn_nbctl_output(lrp_raw_data)
+    lrp_raw_data = ovn.ovn_nbctl('find', 'Logical_Router_port',
+                                 'name=%s' % lswitch_name)
+    lrp_data = ovn.parse_ovn_nbctl_output(lrp_raw_data)
     if len(lrp_data) > 1:
         LOG.warn("I really was not expecting more than one router port... "
                  "I'll pick the first, there's a %.2f\% chance I'll get it "
@@ -428,17 +359,17 @@ def init_host(args, network_config=None, check_local_switch=True):
         lrp_mac = _generate_mac()
         cidr = netaddr.IPNetwork(subnet)
         ip_address = netaddr.IPAddress(cidr.first + 1)
-        lrp_uuid = ovn_nbctl('--', '--id=@lrp', 'create',
-                             'Logical_Router_port',
-                             'name=%s' % lswitch_name,
-                             'network=%s' % ip_address,
-                             'mac="%s"' % lrp_mac, '--', 'add',
-                             'Logical_Router', lrouter_name, 'ports',
-                             '@lrp', '--', 'lport-add',
-                             lswitch_name, 'rp-%s' % lswitch_name)
-        ovn_nbctl('set', 'Logical_port', 'rp-%s' % lswitch_name,
-                  'type=router', 'options:router-port=%s' % lswitch_name,
-                  'addresses="%s"' % lrp_mac)
+        lrp_uuid = ovn.ovn_nbctl('--', '--id=@lrp', 'create',
+                                 'Logical_Router_port',
+                                 'name=%s' % lswitch_name,
+                                 'network=%s' % ip_address,
+                                 'mac="%s"' % lrp_mac, '--', 'add',
+                                 'Logical_Router', lrouter_name, 'ports',
+                                 '@lrp', '--', 'lport-add',
+                                 lswitch_name, 'rp-%s' % lswitch_name)
+        ovn.ovn_nbctl('set', 'Logical_port', 'rp-%s' % lswitch_name,
+                      'type=router', 'options:router-port=%s' % lswitch_name,
+                      'addresses="%s"' % lrp_mac)
         LOG.debug("Configured logical router port: %s", lrp_uuid)
 
 
@@ -449,13 +380,13 @@ def _cni_del(container_id, network_config):
     # TODO: We might first want to have the code that adds them
     # Remove OVN Logical port
     try:
-        ovn_nbctl("lport-del", container_id)
+        ovn.ovn_nbctl("lport-del", container_id)
     except Exception:
         message = "Unable to remove OVN logical port"
         LOG.exception(message)
         raise OVNCNIException(110, message)
     try:
-        ovs_vsctl("del-port", container_id[:15])
+        ovn.ovs_vsctl("del-port", container_id[:15])
     except Exception:
         message = "failed to delete OVS port %s" % container_id[:15]
         LOG.exception(message)
