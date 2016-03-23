@@ -4,15 +4,10 @@ from oslo_config import cfg
 from oslo_log import log
 import requests
 
+from ovn_k8s import constants
 from ovn_k8s.lib import ovn
 
 LOG = log.getLogger(__name__)
-
-K8S_POD_NAME = 'k8s_pod_name'
-K8S_POD_NAMESPACE = 'k8s_pod_namespace'
-K8S_ISOLATION_ANN = 'net.alpha.kubernetes.io/network-isolation'
-
-DEFAULT_ACL_PRIORITY = 1001
 
 # TODO(me): Remove remaining code duplication
 
@@ -44,7 +39,7 @@ def _is_namespace_isolated(namespace):
     annotations = _get_ns_annotations(cfg.CONF.k8s_api_server_host,
                                       cfg.CONF.k8s_api_server_port,
                                       namespace)
-    isolation = annotations and annotations.get(K8S_ISOLATION_ANN)
+    isolation = annotations and annotations.get(constants.K8S_ISOLATION_ANN)
     if isolation == 'on':
         return True
     else:
@@ -52,8 +47,8 @@ def _is_namespace_isolated(namespace):
 
 
 def _process_ovn_db_change(row, action, external_ids):
-    pod_name = external_ids[K8S_POD_NAME]
-    pod_ns = external_ids.get(K8S_POD_NAMESPACE, 'default')
+    pod_name = external_ids[constants.K8S_POD_NAME.lower()]
+    pod_ns = external_ids.get(constants.K8S_POD_NAMESPACE.lower(), 'default')
     LOG.info("Processing OVN DB %s for row %s - external_ids: %s",
              action, row, external_ids)
     LOG.debug("Retrieving isolation status for namespace: %s", pod_ns)
@@ -61,7 +56,7 @@ def _process_ovn_db_change(row, action, external_ids):
     if not _is_namespace_isolated(pod_ns):
         LOG.debug("Namespace %s not isolated, whitelisting all traffic",
                   pod_ns)
-        acls.append((DEFAULT_ACL_PRIORITY,
+        acls.append((constants.DEFAULT_ACL_PRIORITY,
                      'outport==\\"%s\\" && ip' % row,
                      'allow-related'))
     else:
@@ -107,7 +102,7 @@ def ovn_watcher():
             if action not in ('initial', 'update', 'delete'):
                 continue
             external_ids = _build_external_ids_dict(items[4])
-            if K8S_POD_NAME in external_ids:
+            if constants.K8S_POD_NAME.lower() in external_ids:
                 _process_ovn_db_change(row, action, external_ids)
 
 

@@ -12,28 +12,11 @@ import sys
 from oslo_config import cfg
 from oslo_log import log
 
+from ovn_k8s import constants
 from ovn_k8s.lib import ovn
 from ovn_k8s import utils
 
-
-LOGFILE = 'ovn_cni.log'
 LOG = log.getLogger(__name__)
-
-DEFAULT_LROUTER_NAME = "k8s-router"
-OVN_BRIDGE = "br-int"
-
-CNI_VERSION = "0.1.0"
-CNI_COMMAND = "CNI_COMMAND"
-CNI_CONTAINER_ID = "CNI_CONTAINERID"
-CNI_IFNAME = "CNI_IFNAME"
-CNI_NETNS = "CNI_NETNS"
-CNI_ARGS = "CNI_ARGS"
-K8S_POD_NAME = "K8S_POD_NAME"
-K8S_POD_NAMESPACE = "K8S_POD_NAMESPACE"
-
-KUBELET_PORT = 10255
-
-DEFAULT_ACL_PRIORITY = 1001
 
 
 class OVNCNIException(Exception):
@@ -45,7 +28,7 @@ class OVNCNIException(Exception):
         self._details = details
 
     def cni_error(self):
-        error_data = {'cniVersion': CNI_VERSION,
+        error_data = {'cniVersion': constants.CNI_VERSION,
                       'code': self._code,
                       'message': self._msg}
         if self._details:
@@ -77,7 +60,8 @@ def _generate_mac(prefix="00:00:00"):
 def _get_host_lswitch_name():
     # Use kubelet introspection API to grab machine ID.
     # TODO: Some error checking might be worth
-    response = requests.get("http://localhost:%d/spec" % KUBELET_PORT)
+    response = requests.get("http://localhost:%d/spec" %
+                            constants.KUBELET_PORT)
     data = response.json()
     # Use that machine ID as OVN lswitch name
     return data['machine_id']
@@ -214,7 +198,7 @@ def _create_ovn_logical_port(lswitch_name, container_id, mac,
         # Note: The reason rather complicated expression is to be able to set
         # an external id for the ACL as well (acl-add won't return the ACL id)
         ovn.create_ovn_acl(lswitch_name, pod_name, container_id,
-                           DEFAULT_ACL_PRIORITY,
+                           constants.DEFAULT_ACL_PRIORITY,
                            'outport\=\=\"%s\"\ &&\ ip' % container_id,
                            'drop')
         # Sore the port name and the kubernetes pod name in the ACL's external
@@ -237,15 +221,15 @@ def _create_ovn_logical_port(lswitch_name, container_id, mac,
 
 def _cni_add(network_config, lswitch_name):
     try:
-        netns_dst = os.environ[CNI_NETNS]
-        container_id = os.environ[CNI_CONTAINER_ID]
-        cni_args_str = os.environ[CNI_ARGS]
+        netns_dst = os.environ[constants.CNI_NETNS]
+        container_id = os.environ[constants.CNI_CONTAINER_ID]
+        cni_args_str = os.environ[constants.CNI_ARGS]
         # CNI_ARGS has the format key=value;key2=value2;...
         cni_args = dict(item.split('=') for item in cni_args_str.split(';'))
-        pod_name = cni_args[K8S_POD_NAME]
+        pod_name = cni_args[constants.K8S_POD_NAME]
         # Not sure whether K8S_POD_NAMESPACE is an 'official' CNI arg
-        ns_name = cni_args.get(K8S_POD_NAMESPACE)
-        dev = os.environ.get(CNI_IFNAME, 'eth0')
+        ns_name = cni_args.get(constants.K8S_POD_NAMESPACE)
+        dev = os.environ.get(constants.CNI_IFNAME, 'eth0')
         pid_match = re.match("^/proc/(.\d*)/ns/net$", netns_dst)
         if not pid_match:
             raise OVNCNIException(
@@ -273,7 +257,8 @@ def _cni_add(network_config, lswitch_name):
 
     # Add the port to a OVS bridge and set the vlan
     try:
-        ovn.ovs_vsctl('add-port', OVN_BRIDGE, veth_outside,  '--', 'set',
+        ovn.ovs_vsctl('add-port', constants.OVN_BRIDGE,
+                      veth_outside,  '--', 'set',
                       'interface', veth_outside,
                       'external_ids:attached_mac=%s' % mac,
                       'external_ids:iface-id=%s' % container_id,
@@ -291,7 +276,7 @@ def _cni_add(network_config, lswitch_name):
 
 
 def _cni_output(result):
-    output = {'cniVersion': CNI_VERSION,
+    output = {'cniVersion': constants.CNI_VERSION,
               'ip4': {'ip': '%s/%s' % (result['ip_address'],
                                        result['network'].prefixlen),
                       'gateway': str(result['gateway_ip'])}}
@@ -398,7 +383,7 @@ def cni_add(args):
         LOG.debug("Reading configuration on standard input")
         LOG.debug("As for the env...")
         network_config = _parse_stdin()
-        container_id = os.environ.get(CNI_CONTAINER_ID)
+        container_id = os.environ.get(constants.CNI_CONTAINER_ID)
         LOG.debug("Network config from input: %s", network_config)
         LOG.debug("Verifying host setup")
         lswitch_name = _check_host_vswitch(args, network_config)
@@ -418,7 +403,7 @@ def cni_del(args):
     try:
         LOG.debug("Reading configuration on standard input")
         network_config = _parse_stdin()
-        container_id = os.environ.get(CNI_CONTAINER_ID)
+        container_id = os.environ.get(constants.CNI_CONTAINER_ID)
         LOG.debug("Verifying host setup")
         _check_host_vswitch(args, network_config)
         LOG.debug("Network config from input: %s", network_config)
@@ -437,7 +422,7 @@ def parse_args():
     # Parser for init command (not a CNI command)
     parser_host_init = subparsers.add_parser('init')
     parser_host_init.add_argument('--lrouter-name',
-                                  default=DEFAULT_LROUTER_NAME)
+                                  default=constants.DEFAULT_LROUTER_NAME)
     parser_host_init.add_argument('--subnet', default=None)
     parser_host_init.set_defaults(func=init_host)
     # Parser for CNI ADD command
@@ -452,10 +437,10 @@ def parse_args():
 
 def main():
     log.register_options(cfg.CONF)
-    cfg.CONF.set_override('log_file', LOGFILE)
+    cfg.CONF.set_override('log_file', constants.CNI_LOGFILE)
     cfg.CONF.set_override('debug', True)
     log.setup(cfg.CONF, 'ovn_cni')
-    cni_command = os.environ.get(CNI_COMMAND)
+    cni_command = os.environ.get(constants.CNI_COMMAND)
     LOG.debug("CNI Command in environment: %s", cni_command)
     if cni_command:
         sys.argv = [sys.argv[0], cni_command] + sys.argv[1:]
