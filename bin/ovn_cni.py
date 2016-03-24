@@ -86,7 +86,9 @@ def _check_host_vswitch(args, network_config):
     # Check for host logical switch
     lswitch_name = _get_host_lswitch_name()
     if not _check_vswitch(lswitch_name):
-        raise OVNCNIException(199, "Node OVN logical switch not configured")
+        message = "Node OVN logical switch not configured"
+        LOG.error(message)
+        raise OVNCNIException(199, message)
     return lswitch_name
 
 
