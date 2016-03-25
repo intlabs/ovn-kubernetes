@@ -50,37 +50,49 @@ def _is_namespace_isolated(namespace):
 def _process_ovn_db_change(row, action, external_ids):
     pod_name = external_ids[constants.K8S_POD_NAME.lower()]
     pod_ns = external_ids.get(constants.K8S_POD_NAMESPACE.lower(), 'default')
-    LOG.info("Processing OVN DB %s for row %s - external_ids: %s",
+    LOG.info("Processing OVN DB action '%s' for row %s - external_ids: %s",
              action, row, external_ids)
-    LOG.debug("Retrieving isolation status for namespace: %s", pod_ns)
+    old_acls_raw = ovn.ovn_nbctl('find', 'ACL',
+                                 'external_ids:pod_name=%s' % pod_name)
+    old_acls = ovn.parse_ovn_nbctl_output(old_acls_raw)
     acls = []
-    if not _is_namespace_isolated(pod_ns):
-        LOG.debug("Namespace %s not isolated, whitelisting all traffic",
-                  pod_ns)
-        acls.append((constants.DEFAULT_ACL_PRIORITY,
-                     r'outport\=\=\"%s\"\ &&\ ip' % row,
-                     'allow-related'))
-    else:
-        # Do policies only if isolation is on
-        LOG.debug("Retrieving policies in namespace ... for pod %s", pod_name)
-        LOG.debug("Fetching IP address for Pods in from clause")
+    if action != 'delete':
+        LOG.debug("Retrieving isolation status for namespace: %s", pod_ns)
+        if not _is_namespace_isolated(pod_ns):
+            LOG.debug("Namespace %s not isolated, whitelisting all traffic",
+                      pod_ns)
+            acls.append((constants.DEFAULT_ACL_PRIORITY,
+                         r'outport\=\=\"%s\"\ &&\ ip' % row,
+                         'allow-related'))
+            # Find lswitch for lport
+            ls_data_raw = ovn.ovn_nbctl('find', 'Logical_Switch', 'ports{>=}%s' % row)
+            ls_data = ovn.parse_ovn_nbctl_output(ls_data_raw)
+            ls_data = ls_data[0]
+            ls_name = ls_data['name'].strip('"')
+        else:
+            # Do policies only if isolation is on
+            LOG.debug("Retrieving policies in namespace ... for pod %s", pod_name)
+            LOG.debug("Fetching IP address for Pods in from clause")
+    elif old_acls:
+        # For delete operations the logical port is unfortunately gone... but the
+        # logical switch can be found from existing ACLs... and if there are no
+        # existing ACLs then there's just nothing to do e bonanott e sunautur
+        ls_data_raw = ovn.ovn_nbctl('find', 'Logical_Switch',
+                                    'acls{>=}%s' % old_acls[0]['_uuid'])
+        ls_data = ovn.parse_ovn_nbctl_output(ls_data_raw)
+        ls_data = ls_data[0]
+        ls_name = ls_data['name'].strip('"')
+
     # TODO(me): Program ACLs without leaving even a fraction of second in
     # which the container is not secured
-    # Find lswitch for port
-    ls_data_raw = ovn.ovn_nbctl('find', 'Logical_Switch', 'ports{>=}%s' % row)
-    ls_data = ovn.parse_ovn_nbctl_output(ls_data_raw)
-    ls_data = ls_data[0]
-    ls_name = ls_data['name'].strip('"')
-    current_acls_raw = ovn.ovn_nbctl('find', 'ACL',
-                                     'external_ids:pod_name=%s' % pod_name)
-    current_acls = ovn.parse_ovn_nbctl_output(current_acls_raw)
-    LOG.debug("Implementing OVN ACLS for pod %s on lswitch %s",
-              pod_name, ls_name)
-    LOG.debug("Removing existing ACLS for pod %s on lswitch %s",
-              pod_name, ls_name)
+    if acls:
+       LOG.debug("Implementing OVN ACLS for pod %s on lswitch %s",
+                 pod_name, ls_name)
     for acl in acls:
         ovn.create_ovn_acl(ls_name, pod_name, row, *acl)
-    for acl in current_acls:
+    LOG.debug("Removing existing ACLS for pod %s on lswitch %s",
+              pod_name, ls_name)
+    for acl in old_acls:
         ovn.ovn_nbctl('remove', 'Logical_Switch', ls_name,
                       'acls', acl['_uuid'])
     LOG.info("ACLs for Pod: %s configured", pod_name)
@@ -92,15 +104,34 @@ def ovn_watcher():
     proc = subprocess.Popen(['sudo', 'ovsdb-client', 'monitor',
                              'OVN_Northbound', 'Logical_Port'],
                             stdout=subprocess.PIPE)
+    updated_row = None
     while True:
         line = proc.stdout.readline()
-        if line:
+        if line.strip():
             items = re.findall(r"\[.*?\]|\{.*?\}|\s*?[^\s\[\{\}\]]+?\s", line)
-            row = items[0].strip()
-            action = items[1].strip()
-            if action not in ('initial', 'update', 'delete'):
-                continue
-            external_ids = _build_external_ids_dict(items[4])
+            # 'new' action does not begin with a row identifier
+            if updated_row:
+                row = updated_row
+                action_idx = 0
+                external_ids_idx = 3
+            else:
+                row = items[0].strip()
+                action_idx = 1
+                external_ids_idx = 4
+
+            action = items[action_idx].strip()
+            # This should automatically exclude lines which contain column
+            # headers or dashes
+            if action == 'old':
+               # There should never be a 'old' event followed by another 'old'
+               # event before a 'new' event occurs (hopefully)
+               updated_row = items[0].strip()
+               continue
+            else:
+               updated_row = None
+               if action not in ('initial', 'new', 'delete'):
+                   continue
+            external_ids = _build_external_ids_dict(items[external_ids_idx])
             if constants.K8S_POD_NAME.lower() in external_ids:
                 _process_ovn_db_change(row, action, external_ids)
 
