@@ -377,9 +377,20 @@ def _cni_del(container_id, network_config):
     try:
         ovn.ovs_vsctl("del-port", container_id[:15])
     except Exception:
+        # Do not make this critical - in some cases the port appears to
+        # have already been deleted (need more investigation)
         message = "failed to delete OVS port %s" % container_id[:15]
         LOG.exception(message)
-        raise OVNCNIException(111, message)
+    # Remove namespace
+    netns_dst = os.environ[constants.CNI_NETNS]
+    pid_match = re.match("^/proc/(.\d*)/ns/net$", netns_dst)
+    if not pid_match:
+        raise OVNCNIException(
+            103, "Unable to extract container pid from namespace")
+    pid = pid_match.groups()[0]
+    LOG.debug("Container pid: %s; Removing namespace link", pid)
+    command = "rm -f /var/run/netns/%s" % pid
+    utils.call_popen(shlex.split(command))
 
 
 def cni_add(args):
@@ -388,6 +399,7 @@ def cni_add(args):
         LOG.debug("As for the env...")
         network_config = _parse_stdin()
         container_id = os.environ.get(constants.CNI_CONTAINER_ID)
+        LOG.info("Configuring networking for container:%s", container_id)
         LOG.debug("Network config from input: %s", network_config)
         LOG.debug("Verifying host setup")
         lswitch_name = _check_host_vswitch(args, network_config)
@@ -408,6 +420,7 @@ def cni_del(args):
         LOG.debug("Reading configuration on standard input")
         network_config = _parse_stdin()
         container_id = os.environ.get(constants.CNI_CONTAINER_ID)
+        LOG.info("Deconfiguring networking for container:%s", container_id)
         LOG.debug("Verifying host setup")
         _check_host_vswitch(args, network_config)
         LOG.debug("Network config from input: %s", network_config)
