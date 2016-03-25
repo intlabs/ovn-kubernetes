@@ -22,7 +22,6 @@ def _get_ovn_remote():
                 "get", "Open_vSwitch", ".",
                 "external_ids:ovn-remote").strip('"')
         except Exception as e:
-            # TODO: custom exceptions
             raise Exception("Unable to find a location for the "
                             "OVN NorthBound DB:%s" % e)
     return _get_ovn_remote.location
@@ -73,7 +72,7 @@ def create_ovn_acl(ls_name, pod_name, lport_name, priority, match, action):
     # an external id for the ACL as well (acl-add won't return the ACL id)
     ovn_nbctl('--', '--id=@acl_id', 'create', 'ACL', 'action=%s' % action,
               'direction=to-lport', 'priority=%d' % priority,
-              'match="%s"' % match,
+              'match=%s' % match,
               'external_ids:lport_name=%s' % lport_name,
               'external_ids:pod_name=%s' % pod_name, '--',
               'add', 'Logical_Switch', ls_name, 'acls', '@acl_id')

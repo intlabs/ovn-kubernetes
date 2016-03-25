@@ -155,6 +155,7 @@ def _setup_interface(pid, container_id, dev, mac,
                   container_id, dev)
         command = "ip netns exec %s ip link set dev %s address %s" \
                   % (pid, dev, mac)
+        utils.call_popen(shlex.split(command))
         # Set the gateway
         command = "ip netns exec %s ip route add default via %s" \
                   % (pid, gateway_ip)
@@ -191,8 +192,9 @@ def _create_ovn_logical_port(lswitch_name, container_id, mac,
         # Set the ip address and mac address
         LOG.debug("Setting up MAC (%s) and IP (%s) addresses for logical port",
                   mac, ip_address)
-        ovn.ovn_nbctl('lport-set-addresses', container_id,
-                      '"%s %s"' % (mac, ip_address))
+        cmd_items = tuple(shlex.split('lport-set-addresses %s "%s %s"' %
+                                      (container_id, mac, ip_address)))
+        ovn.ovn_nbctl(*cmd_items)
         # Block all ingress traffic
         # TODO: also block egress if Kubernetes network policy allow to
         # discipline it
@@ -203,7 +205,7 @@ def _create_ovn_logical_port(lswitch_name, container_id, mac,
                            constants.DEFAULT_ACL_PRIORITY,
                            'outport\=\=\"%s\"\ &&\ ip' % container_id,
                            'drop')
-        # Sore the port name and the kubernetes pod name in the ACL's external
+        # Store the port name and the kubernetes pod name in the ACL's external
         # IDs. This will make retrieval easier
         # Store pod name and, if provided, the namespace name in port's
         # external ids in order to keep track of the association between
