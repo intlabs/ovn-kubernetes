@@ -1,3 +1,5 @@
+import shlex
+
 from oslo_config import cfg
 from oslo_log import log
 
@@ -71,9 +73,10 @@ def parse_ovn_nbctl_output(data, scalar=False):
 def create_ovn_acl(ls_name, pod_name, lport_name, priority, match, action):
     # Note: The reason rather complicated expression is to be able to set
     # an external id for the ACL as well (acl-add won't return the ACL id)
-    ovn_nbctl('--', '--id=@acl_id', 'create', 'ACL', 'action=%s' % action,
-              'direction=to-lport', 'priority=%d' % priority,
-              'match="%s"' % match,
-              'external_ids:lport_name=%s' % lport_name,
-              'external_ids:pod_name=%s' % pod_name, '--',
-              'add', 'Logical_Switch', ls_name, 'acls', '@acl_id')
+    command = ('-- --id=@acl_id create ACL action=%s direction=to-lport '
+               'priority=%d match="%s" external_ids:lport_name=%s '
+               'external_ids:pod_name=%s -- '
+               'add Logical_Switch %s acls @acl_id' %
+               (action, priority, match, lport_name, pod_name, ls_name))
+    command_items = tuple(shlex.split(command))
+    ovn_nbctl(*command_items)

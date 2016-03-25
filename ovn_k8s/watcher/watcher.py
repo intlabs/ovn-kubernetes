@@ -1,3 +1,4 @@
+import re
 import subprocess
 
 from oslo_config import cfg
@@ -13,11 +14,11 @@ LOG = log.getLogger(__name__)
 
 
 def _build_external_ids_dict(ext_id_str):
-    ext_id_str = ext_id_str.strip('{}')
+    ext_id_str = ext_id_str.strip('{}').strip()
     if not ext_id_str:
         return {}
     ext_id_items = [item.split('=') for item in ext_id_str.split(',')]
-    return dict((item[0].strip('"'), item[1]) for item in ext_id_items)
+    return dict((item[0].strip(' "'), item[1]) for item in ext_id_items)
 
 
 def _get_ns_annotations(api_server, api_port, namespace):
@@ -57,7 +58,7 @@ def _process_ovn_db_change(row, action, external_ids):
         LOG.debug("Namespace %s not isolated, whitelisting all traffic",
                   pod_ns)
         acls.append((constants.DEFAULT_ACL_PRIORITY,
-                     'outport==\\"%s\\" && ip' % row,
+                     r'outport\=\=\"%s\"\ &&\ ip' % row,
                      'allow-related'))
     else:
         # Do policies only if isolation is on
@@ -94,11 +95,9 @@ def ovn_watcher():
     while True:
         line = proc.stdout.readline()
         if line:
-            # hack for whitespace in external_ids
-            line = line.replace(', ', ',')
-            items = line.split()
-            row = items[0]
-            action = items[1]
+            items = re.findall(r"\[.*?\]|\{.*?\}|\s*?[^\s\[\{\}\]]+?\s", line)
+            row = items[0].strip()
+            action = items[1].strip()
             if action not in ('initial', 'update', 'delete'):
                 continue
             external_ids = _build_external_ids_dict(items[4])
