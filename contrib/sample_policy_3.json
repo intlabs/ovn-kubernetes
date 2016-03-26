@@ -1,0 +1,23 @@
+{"kind": "NetworkPolicy",
+ "apiVersion": "experimental.kubernetes.io/v1",
+ "metadata":
+   {"name": "sample policy 3"},
+ "ingress":
+  [
+    {"ports":
+      [
+        { "protocol": "TCP",
+          "port": "80"}
+      ],
+     "from":
+      [
+        {"pods":
+          {"tier": "middle"}
+        },
+        {"namespaces":
+          {"meh": "true"}
+        }
+      ]
+    }
+  ]
+}

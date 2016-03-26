@@ -1,0 +1,14 @@
+{"kind": "NetworkPolicy",
+ "apiVersion": "experimental.kubernetes.io/v1",
+ "metadata":
+   {"name": "sample policy 2"},
+ "ingress":
+  [
+    {"ports":
+      [
+        { "protocol": "TCP",
+          "port": "80"}
+      ]
+    }
+  ]
+}
