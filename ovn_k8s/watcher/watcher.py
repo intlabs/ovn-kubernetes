@@ -1,3 +1,4 @@
+import json
 import re
 import subprocess
 
@@ -7,6 +8,7 @@ import requests
 
 from ovn_k8s import constants
 from ovn_k8s.lib import ovn
+from ovn_k8s.lib import kubernetes as k8s
 
 LOG = log.getLogger(__name__)
 
@@ -65,18 +67,20 @@ def _process_ovn_db_change(row, action, external_ids):
                          r'outport\=\=\"%s\"\ &&\ ip' % row,
                          'allow-related'))
             # Find lswitch for lport
-            ls_data_raw = ovn.ovn_nbctl('find', 'Logical_Switch', 'ports{>=}%s' % row)
+            ls_data_raw = ovn.ovn_nbctl('find', 'Logical_Switch',
+                                        'ports{>=}%s' % row)
             ls_data = ovn.parse_ovn_nbctl_output(ls_data_raw)
             ls_data = ls_data[0]
             ls_name = ls_data['name'].strip('"')
         else:
             # Do policies only if isolation is on
-            LOG.debug("Retrieving policies in namespace ... for pod %s", pod_name)
+            LOG.debug("Retrieving policies in namespace ... for pod %s",
+                      pod_name)
             LOG.debug("Fetching IP address for Pods in from clause")
     elif old_acls:
-        # For delete operations the logical port is unfortunately gone... but the
-        # logical switch can be found from existing ACLs... and if there are no
-        # existing ACLs then there's just nothing to do e bonanott e sunautur
+        # For delete operations the logical port is unfortunately gone... but
+        # the logical switch can be found from existing ACLs, and if there are
+        # no existing ACLs then there's just nothing to do e bonanott
         ls_data_raw = ovn.ovn_nbctl('find', 'Logical_Switch',
                                     'acls{>=}%s' % old_acls[0]['_uuid'])
         ls_data = ovn.parse_ovn_nbctl_output(ls_data_raw)
@@ -86,8 +90,8 @@ def _process_ovn_db_change(row, action, external_ids):
     # TODO(me): Program ACLs without leaving even a fraction of second in
     # which the container is not secured
     if acls:
-       LOG.debug("Implementing OVN ACLS for pod %s on lswitch %s",
-                 pod_name, ls_name)
+        LOG.debug("Implementing OVN ACLS for pod %s on lswitch %s",
+                  pod_name, ls_name)
     for acl in acls:
         ovn.create_ovn_acl(ls_name, pod_name, row, *acl)
     LOG.debug("Removing existing ACLS for pod %s on lswitch %s",
@@ -123,14 +127,14 @@ def ovn_watcher():
             # This should automatically exclude lines which contain column
             # headers or dashes
             if action == 'old':
-               # There should never be a 'old' event followed by another 'old'
-               # event before a 'new' event occurs (hopefully)
-               updated_row = items[0].strip()
-               continue
+                # There should never be a 'old' event followed by another 'old'
+                # event before a 'new' event occurs (hopefully)
+                updated_row = items[0].strip()
+                continue
             else:
-               updated_row = None
-               if action not in ('initial', 'new', 'delete'):
-                   continue
+                updated_row = None
+                if action not in ('initial', 'new', 'delete'):
+                    continue
             external_ids = _build_external_ids_dict(items[external_ids_idx])
             if constants.K8S_POD_NAME.lower() in external_ids:
                 _process_ovn_db_change(row, action, external_ids)
@@ -144,3 +148,34 @@ def k8s_ns_watcher():
 def k8s_nw_policy_watcher():
     """Monitor network policy changes."""
     LOG.info("Monitoring Kubernetes Network Policies")
+
+
+def _refresh_network_policies(action, pod_spec, pod_metadata, pod_ip):
+    LOG.debug("Refreshing network policies for IP:%s and action:%s",
+              pod_ip, action)
+
+
+def _process_pod_event(event):
+    pod_ip = event['object']['status']['podIP']
+    pod_spec = event['object']['spec']
+    pod_metadata = event['object']['metadata']
+    event_type = event['type']
+    LOG.debug("Processing event %s for pod %s",
+              event_type, pod_metadata['name'])
+    # Processing events one-by-one is not the best solution from a scale and
+    # performance perspective, espcially as pods are usually created and
+    # destroyed in groups. This routine might therefore uses logic for adding
+    # events to a queue and do some batch processing when possible.
+    _refresh_network_policies(event_type, pod_spec, pod_metadata, pod_ip)
+
+
+def k8s_pod_watcher():
+    """Monitor pod create/destroy events."""
+    LOG.info("Monitoring Kubernetes pods")
+    pod_stream = k8s.watch_pods(cfg.CONF.k8s_api_server_host,
+                                cfg.CONF.k8s_api_server_port)
+    for line in pod_stream:
+        try:
+            _process_pod_event(json.loads(line))
+        except ValueError:
+            LOG.debug("Not valid JSON data:%s", line)

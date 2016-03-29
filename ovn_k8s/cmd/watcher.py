@@ -33,6 +33,7 @@ def main():
     pool = eventlet.greenpool.GreenPool()
     pool.spawn(watcher.ovn_watcher)
     pool.spawn(watcher.k8s_ns_watcher)
+    pool.spawn(watcher.k8s_pod_watcher)
     pool.spawn(watcher.k8s_nw_policy_watcher)
     pool.waitall()
     LOG.info("Kubernetes-OVN watcher terminated")
