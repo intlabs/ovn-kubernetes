@@ -6,25 +6,16 @@ eventlet.monkey_patch()
 from oslo_config import cfg
 from oslo_log import log
 
+from ovn_k8s import config
 from ovn_k8s.watcher import watcher
 
 LOGFILE = 'k8s_ovn_watcher.log'
 LOG = log.getLogger(__name__)
 
 
-def _init_conf():
-    # Register options
-    watcher_opts = [
-        cfg.StrOpt('k8s_api_server_host', default='127.0.0.1'),
-        cfg.IntOpt('k8s_api_server_port', default='8080'),
-        cfg.StrOpt('ovn_remote', default='unix:/var/run/openvswitch/db.sock')]
-    cfg.CONF.register_opts(watcher_opts)
-    cfg.CONF(args=sys.argv[1:], project='ovn-k8s')
-
-
 def main():
     log.register_options(cfg.CONF)
-    _init_conf()
+    config.init_conf(sys.argv[1:])
     cfg.CONF.set_override('log_file', LOGFILE)
     cfg.CONF.set_override('debug', True)
     log.setup(cfg.CONF, 'k8s_ovn_watcher')

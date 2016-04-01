@@ -288,6 +288,11 @@ def _cni_output(result):
 
 
 def init_host(args, network_config=None):
+    # Store/Update the NorthBound DB location in OpenVswitch external ids to
+    # avoid relying on hardcoded configuration files locations when the plugin
+    # is invoked by kubernetes
+    ovn.ovs_vsctl("set", "Open_vSwitch", ".",
+                  "external_ids:ovnnb-remote=%s" % args.ovn_remote)
     # Check for logical router, if not found create one
     lrouter_name = args.lrouter_name
     lrouter_raw_data = ovn.ovn_nbctl('find', 'Logical_Router',
@@ -441,6 +446,7 @@ def parse_args():
     parser_host_init.add_argument('--lrouter-name',
                                   default=constants.DEFAULT_LROUTER_NAME)
     parser_host_init.add_argument('--subnet', default=None)
+    parser_host_init.add_argument('--ovn-remote', default=None)
     parser_host_init.set_defaults(func=init_host)
     # Parser for CNI ADD command
     parser_cni_add = subparsers.add_parser("ADD")

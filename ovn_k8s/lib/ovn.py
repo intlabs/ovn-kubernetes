@@ -22,7 +22,7 @@ def _get_ovn_remote():
         try:
             _get_ovn_remote.location = ovs_vsctl(
                 "get", "Open_vSwitch", ".",
-                "external_ids:ovn-remote").strip('"')
+                "external_ids:ovnnb-remote").strip('"')
         except Exception as e:
             raise Exception("Unable to find a location for the "
                             "OVN NorthBound DB:%s" % e)
