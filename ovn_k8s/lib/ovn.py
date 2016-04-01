@@ -33,7 +33,7 @@ _get_ovn_remote.location = None
 def ovn_nbctl(*args):
     # Try to get OVN remote from config first
     try:
-        ovn_remote = cfg.CONF.ovn_remote
+        ovn_remote = cfg.CONF.ovn_nb_remote
     except cfg.NoSuchOptError:
         ovn_remote = None
     if not ovn_remote:

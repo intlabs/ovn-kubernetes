@@ -106,7 +106,7 @@ def ovn_watcher():
     """Monitor changes in OVN NB DB."""
     LOG.info("Monitoring OVN Northbound DB")
     proc = subprocess.Popen(['sudo', 'ovsdb-client', 'monitor',
-                             'OVN_Northbound', 'Logical_Port'],
+                             cfg.CONF.ovn_nb_remote, 'Logical_Port'],
                             stdout=subprocess.PIPE)
     updated_row = None
     while True:
