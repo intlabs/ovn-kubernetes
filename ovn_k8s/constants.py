@@ -15,4 +15,33 @@ K8S_ISOLATION_ANN = 'net.alpha.kubernetes.io/network-isolation'
 
 KUBELET_PORT = 10255
 
+DEFAULT_ALLOW_ACL_PRIORITY = 9999
 DEFAULT_ACL_PRIORITY = 1001
+
+# Constants for policy events
+NS_EVENT_PRIORITY = 10
+POD_EVENT_PRIORITY = 20
+NP_EVENT_PRIORITY = 30
+LPORT_EVENT_PRIORITY = 40
+
+LPORT_ADD = 'lport_add'
+LPORT_DEL = 'lport_del'
+POD_ADD = 'pod_add'
+POD_DEL = 'pod_del'
+POD_UPDATE = 'pod_update'
+NP_ADD = 'network_policy_add'
+NP_DEL = 'network_policy_delete'
+NP_UPDATE = 'network_policicy_update'
+NS_UPDATE = 'namespace_update'
+
+EVENT_PRIORITIES = {
+    LPORT_ADD: LPORT_EVENT_PRIORITY,
+    LPORT_DEL: LPORT_EVENT_PRIORITY,
+    POD_ADD: POD_EVENT_PRIORITY,
+    POD_DEL: POD_EVENT_PRIORITY,
+    POD_UPDATE: POD_EVENT_PRIORITY,
+    NP_ADD: NP_EVENT_PRIORITY,
+    NP_DEL: NP_EVENT_PRIORITY,
+    NP_UPDATE: NP_EVENT_PRIORITY,
+    NS_UPDATE: NS_EVENT_PRIORITY
+}
