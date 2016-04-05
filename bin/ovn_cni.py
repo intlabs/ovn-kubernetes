@@ -203,7 +203,7 @@ def _create_ovn_logical_port(lswitch_name, container_id, mac,
         # an external id for the ACL as well (acl-add won't return the ACL id)
         ovn.create_ovn_acl(lswitch_name, pod_name, container_id,
                            constants.DEFAULT_ACL_PRIORITY,
-                           'outport\=\=\"%s\"\ &&\ ip' % container_id,
+                           r'outport\=\=\"%s\"\ &&\ ip' % container_id,
                            'drop')
         # Store the port name and the kubernetes pod name in the ACL's external
         # IDs. This will make retrieval easier
@@ -212,11 +212,11 @@ def _create_ovn_logical_port(lswitch_name, container_id, mac,
         # pod and logical port
         if ns_name:
             ovn.ovn_nbctl('set', 'Logical_port', container_id,
-                          'external_ids:k8s_pod_name=%s' % pod_name,
-                          'external_ids:k8s_ns_name=%s' % ns_name)
+                          'external_ids:pod_name=%s' % pod_name,
+                          'external_ids:ns_name=%s' % ns_name)
         else:
             ovn.ovn_nbctl('set', 'Logical_port', container_id,
-                          'external_ids:k8s_pod_name=%s' % pod_name)
+                          'external_ids:pod_name=%s' % pod_name)
     except Exception:
         LOG.exception("Unable to configure OVN logical port for pod on "
                       "lswitch %s", lswitch_name)
