@@ -27,6 +27,21 @@ def _list_resource(host, port, resource, namespace=None):
     return response
 
 
+def _get_resource(host, port, resource, name, namespace=None):
+    # Scope URL by namespace if necessary
+    if namespace:
+        namespace_str = "namespaces/%s/" % namespace
+    else:
+        namespace_str = ""
+    url = "http://%s:%d/api/v1/%s%s/%s" % (host, port, namespace_str,
+                                           resource, name)
+    response = requests.get(url)
+    if response.status_code != 200:
+        # TODO(me): raise here
+        return
+    return response
+
+
 def _watch_resource(host, port, resource):
     url = "http://%s:%d/api/v1/%s?watch=true" % (host, port, resource)
     return _stream_api(url)
@@ -52,6 +67,20 @@ def get_pods(host, port, namespace=None):
     if not resources:
         return []
     return resources.json()['items']
+
+
+def get_pod(host, port, namespace, pod_name):
+    resource = _get_resource(host, port, 'pods', pod_name, namespace)
+    if not resource:
+        return
+    return resource.json()
+
+
+def get_namespace(host, port, name):
+    resource = _get_resource(host, port, 'namespaces', name)
+    if not resource:
+        return
+    return resource.json()
 
 
 def get_ns_annotations(host, port, namespace):

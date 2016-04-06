@@ -7,8 +7,11 @@ from six.moves import queue
 from ovn_k8s import constants
 from ovn_k8s.lib import kubernetes as k8s
 from ovn_k8s.lib import ovn
+from ovn_k8s import utils
+from ovn_k8s.watcher import registry
 
 LOG = log.getLogger(__name__)
+WATCHER_REGISTRY = registry.WatcherRegistry.get_instance()
 
 
 class Event(object):
@@ -215,14 +218,53 @@ class PolicyProcessor(object):
         # 4) namespace event -> affect pods in the namespace
         affected_pods = {}
         for event in events:
-            if event in (constants.POD_ADD,
-                         constants.POD_UPDATE,
-                         constants.POD_DEL):
-                pod_name = event.metadata['object']['metadata']['name']
-                affected_pods[pod_name] = [event]
-            elif event == constants.LPORT_ADD:
-                affected_pods[event.metadata['pod_name']] = [event]
-        LOG.debug("#### AFFECTED PODS:%s", affected_pods)
+            if event.event_type in (constants.POD_ADD,
+                                    constants.POD_UPDATE,
+                                    constants.POD_DEL):
+                pod_name = event.metadata['metadata']['name']
+                affected_pods[pod_name] = {
+                    'namespace': event.metadata['metadata']['namespace'],
+                    'events': [event]}
+            elif event.event_type == constants.LPORT_ADD:
+                affected_pods[event.metadata['pod_name']] = {
+                    'namespace': event.metadata['ns_name'],
+                    'events': [event]}
+        LOG.debug("Rebuilding ACLs for pods:%s", affected_pods)
+        pod_watcher = WATCHER_REGISTRY.k8s_pod_watcher
+        if not pod_watcher:
+            LOG.warn("Pod watcher not set. Unable to program ACLs")
+            # TODO(me): Decide whether this should trigger exception
+            return
+        ns_watcher = WATCHER_REGISTRY.k8s_ns_watcher
+        if not ns_watcher:
+            LOG.warn("Namespace watcher not set. Unable to program ACLs")
+            # TODO(me): Decide whether this should trigger exception
+            return
+
+        pod_cache = pod_watcher.pod_cache
+        ns_cache = ns_watcher.ns_cache
+        for pod, events in affected_pods.items():
+            namespace = events['namespace']
+            pod_data = pod_cache.get(pod)
+            if not pod_data:
+                # Note: the information needed are very likely to be in the
+                # event metadata. The code could be optimized by parsing those
+                # as well.
+                pod_data = k8s.get_pod(cfg.CONF.k8s_api_server_host,
+                                       cfg.CONF.k8s_api_server_port,
+                                       namespace, pod)
+            ns_data = ns_cache.get(namespace)
+            if not ns_data:
+                ns_data = k8s.get_namespace(cfg.CONF.k8s_api_server_host,
+                                            cfg.CONF.k8s_api_server_port,
+                                            namespace)
+                ns_data['isolated'] = utils.is_namespace_isolated(namespace)
+
+            if not ns_data.get('isolated', False):
+                LOG.debug("Pod %s deployed in non-isolated namespace: %s."
+                          "Whitelisting traffic", pod, namespace)
+            _whitelist_pod_traffic(pod)
+
         LOG.info("Event processing terminated. ACLs configured")
 
     def run(self):

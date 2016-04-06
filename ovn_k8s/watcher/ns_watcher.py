@@ -6,6 +6,8 @@ from oslo_log import log
 from ovn_k8s import constants
 from ovn_k8s.lib import kubernetes as k8s
 from ovn_k8s import policy_processor as pp
+from ovn_k8s import utils
+from ovn_k8s.watcher import registry
 
 LOG = log.getLogger(__name__)
 EVENT_MAP = {
@@ -14,24 +16,13 @@ EVENT_MAP = {
 }
 
 
-def _is_namespace_isolated(namespace):
-    annotations = k8s.get_ns_annotations(cfg.CONF.k8s_api_server_host,
-                                         cfg.CONF.k8s_api_server_port,
-                                         namespace)
-    isolation = annotations and annotations.get(constants.K8S_ISOLATION_ANN)
-    # Interpret anythign that is not "on" as "off"
-    if isolation == 'on':
-        return True
-    else:
-        return False
-
-
 class NamespaceWatcher(object):
 
-    def __init__(self, ns_stream, np_watcher=None):
+    def __init__(self, ns_stream):
         self._ns_stream = ns_stream
         self.ns_cache = {}
-        self.np_watcher = np_watcher
+        self.np_watcher = (
+            registry.WatcherRegistry.get_instance().k8s_np_watcher)
 
     def _send_event(self, ns_name, event_type):
         event = pp.Event(EVENT_MAP[event_type],
@@ -67,7 +58,7 @@ class NamespaceWatcher(object):
         isolated = None
         was_isolated = None
         was_isolated = cached_ns.get('isolated', False)
-        isolated = _is_namespace_isolated(ns_name)
+        isolated = utils.is_namespace_isolated(ns_name)
         ns_metadata['isolated'] = isolated
         self.ns_cache[ns_name] = ns_metadata
         # Always send events for namespaces that are not in cache

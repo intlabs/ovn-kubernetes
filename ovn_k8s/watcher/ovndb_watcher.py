@@ -18,7 +18,8 @@ def _build_external_ids_dict(ext_id_str):
     if not ext_id_str:
         return {}
     ext_id_items = [item.split('=') for item in ext_id_str.split(',')]
-    return dict((item[0].strip(' "'), item[1]) for item in ext_id_items)
+    return dict((item[0].strip(' "'), item[1].strip('"'))
+                 for item in ext_id_items)
 
 
 class OvndbWatcher(object):
