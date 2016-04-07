@@ -237,10 +237,12 @@ class PolicyProcessor(object):
             if event.event_type in (constants.POD_ADD,
                                     constants.POD_UPDATE,
                                     constants.POD_DEL):
-                pod_name = event.metadata['metadata']['name']
-                affected_pods[pod_name] = {
-                    'namespace': event.metadata['metadata']['namespace'],
-                    'events': [event]}
+                if event.event_type != constants.POD_DEL:
+                    pod_name = event.metadata['metadata']['name']
+                    affected_pods[pod_name] = {
+                        'namespace': event.metadata['metadata']['namespace'],
+                        'events': [event]}
+                # TODO(me): Find policies matching this pod
             elif event.event_type == constants.LPORT_ADD:
                 affected_pods[event.metadata['pod_name']] = {
                     'namespace': event.metadata['ns_name'],
