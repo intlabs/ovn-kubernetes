@@ -13,14 +13,16 @@ def _stream_api(url):
     return response.iter_lines(chunk_size=10, delimiter='\n')
 
 
-def _list_resource(host, port, resource, namespace=None):
+def _list_resource(host, port, resource, namespace=None,
+                   label_selectors=None):
     # Scope URL by namespace if necessary
     if namespace:
         namespace_str = "namespaces/%s/" % namespace
     else:
         namespace_str = ""
     url = "http://%s:%d/api/v1/%s%s" % (host, port, namespace_str, resource)
-    response = requests.get(url)
+    query_params = {'labelSelector': label_selectors}
+    response = requests.get(url, params=query_params)
     if response.status_code != 200:
         # TODO(me): raise here
         return
@@ -62,8 +64,14 @@ def watch_network_policies(host, port, namespace):
     return _stream_api(url)
 
 
-def get_pods(host, port, namespace=None):
-    resources = _list_resource(host, port, 'pods', namespace)
+def get_pods(host, port, namespace=None, pod_selector=None):
+    label_selectors = []
+    if pod_selector:
+        for name, value in pod_selector.items():
+            label_selectors.append('%s=%' % (name, value))
+    resources = _list_resource(host, port, 'pods',
+                               namespace=namespace,
+                               label_selectors=label_selectors)
     if not resources:
         return []
     return resources.json()['items']
@@ -88,6 +96,17 @@ def get_network_policies(host, port, namespace):
     if not resources:
         return []
     return resources['items']
+
+
+def get_network_policy(host, port, namespace, network_policy):
+    # Use API path for 3rd party resource
+    url = ("http://%s:%d/apis/experimental.kubernetes.io/v1/namespaces/"
+           "%s/networkpolicys/%s") % (host, port, namespace, network_policy)
+    response = requests.get(url)
+    if response.status_code != 200:
+        # TODO(me): raise here
+        return
+    return response.json()
 
 
 def get_namespace(host, port, name):

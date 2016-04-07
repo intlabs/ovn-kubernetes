@@ -123,6 +123,23 @@ def _fetch_namespace(namespace):
     return ns_data
 
 
+def _fetch_network_policy(network_policy, namespace):
+    """Retrieve a policy from the cache or the API server."""
+    np_watcher = WATCHER_REGISTRY.k8s_np_watcher
+    if not np_watcher:
+        np_data = None
+        LOG.warn("Network Policy watcher not set. This could be troublesome")
+    else:
+        np_data = np_watcher.np_cache.get(network_policy)
+    if not np_data:
+        np_data = k8s.get_network_policy(
+            cfg.CONF.k8s_api_server_host,
+            cfg.CONF.k8s_api_server_port,
+            namespace,
+            network_policy)
+    return np_data
+
+
 def _find_policies_for_pod(pod_name, pod_namespace):
     pod_data = _fetch_pod(pod_name, pod_namespace)
     if not pod_data:
@@ -244,13 +261,13 @@ class PolicyProcessor(object):
                       "policy. No further processing needed")
         # For each policy generate a policy update event and send it
         # back to the queue
-        policy_events = [(constants.NP_EVENT_PRIORITY,
-                          Event(constants.NP_UPDATE,
-                                policy['metadata']['name'],
-                                policy['metadata']))
-                         for policy in affected_policies]
-        for policy_event in policy_events:
-            get_event_queue().put(policy_event)
+        for policy in affected_policies:
+            policy.update({'from_changed': True})
+            get_event_queue().put(
+                (constants.NP_EVENT_PRIORITY,
+                 Event(constants.NP_UPDATE,
+                       policy['metadata']['name'],
+                       policy)))
 
     def _process_ns_event(self, event, pod_ns_map, affected_pods):
         namespace = event.source
@@ -261,6 +278,23 @@ class PolicyProcessor(object):
         for pod in ns_pods:
             pod_ns_map[pod] = namespace
             affected_pods.setdefault(pod, []).append(event)
+
+    def _process_np_event(self, event, pod_ns_map, affected_pods):
+        namespace = event.metadata['metadata']['namespace']
+        policy = event.source
+        policy_data = _fetch_network_policy(policy, namespace)
+        # Retrieve pods matching policy selector
+        # TODO: use pod cache, even if doing the selector query is so easy
+        pod_selector = policy_data.get('podSelector', {})
+        pods = k8s.get_pods(
+            cfg.CONF.k8s_api_server_host,
+            cfg.CONF.k8s_api_server_port,
+            namespace=namespace,
+            pod_selector=pod_selector)
+        for pod in pods:
+            pod_name = pod['metadata']['name']
+            pod_ns_map[pod_name] = namespace
+            affected_pods.setdefault(pod_name, []).append(event)
 
     def process_events(self, events):
         # Compile pod list PL where policies are applied. Also include pods
@@ -312,10 +346,13 @@ class PolicyProcessor(object):
             elif event.event_type in (constants.NP_ADD,
                                       constants.NP_UPDATE,
                                       constants.NP_DEL):
-                # TODO(me): Find pods that match policies
-                pass
+                self._process_np_event(event, pod_ns_map, affected_pods)
 
         for pod, events in affected_pods.items():
+            LOG.debug("Rebuilding ACL for pod:%s because of:%s",
+                      pod, "; ".join(['%s from %s' % (event.event_type,
+                                                      event.source)
+                                      for event in events]))
             namespace = pod_ns_map[pod]
             _process_pod_acls(pod, namespace)
         for event in events:

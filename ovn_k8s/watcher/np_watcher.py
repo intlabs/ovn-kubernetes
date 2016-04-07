@@ -35,7 +35,7 @@ class NetworkPolicyNSWatcher(object):
 class NetworkPolicyWatcher(object):
 
     def __init__(self):
-        self._np_cache = {}
+        self.np_cache = {}
         self._ns_np_map = {}
         self._np_watcher_threads = {}
         self.notifications = queue.Queue()
@@ -67,11 +67,11 @@ class NetworkPolicyWatcher(object):
         ns_policies = self._ns_np_map[namespace]
         policy_names = [policy['metadata']['name'] for policy in ns_policies]
         for policy_name in policy_names:
-            del self._np_cache[policy_name]
+            del self.np_cache[policy_name]
         del self._ns_np_map[namespace]
 
     def _send_event(self, np_name, event_type, **kwargs):
-        event_metadata = self._np_cache[np_name]
+        event_metadata = self.np_cache[np_name]
         event_metadata.update(kwargs)
         event = pp.Event(EVENT_MAP[event_type],
                          source=np_name,
@@ -88,7 +88,7 @@ class NetworkPolicyWatcher(object):
             LOG.debug("Not interested in event:%s for namespace:%s",
                       event_type, ns_name)
             return
-        cached_np = self._np_cache.get(np_name)
+        cached_np = self.np_cache.get(np_name)
         pod_selector_changed = False
         from_changed = False
         ports_changed = False
@@ -105,7 +105,7 @@ class NetworkPolicyWatcher(object):
             old_ports = cached_np.get('Ports')
             current_ports = np_data.get('Ports')
             ports_changed = (old_ports != current_ports)
-        self._np_cache[np_name] = np_data
+        self.np_cache[np_name] = np_data
         if (not cached_np or pod_selector_changed or
             from_changed or ports_changed):
             # There are changes that need to be processed
