@@ -102,25 +102,39 @@ def _whitelist_pod_traffic(pod_name):
     LOG.info("ACLs for Pod: %s configured", pod_name)
 
 
+def _get_acls(pod_name):
+    acls_raw = ovn.ovn_nbctl('find', 'ACL',
+                             'external_ids:pod_name=%s' % pod_name)
+    return ovn.parse_ovn_nbctl_output(acls_raw)
+
+
+def _remove_acls(acls, remove_default_drop=False):
+    # For delete operations the logical port is unfortunately gone... but
+    # the logical switch can be found from existing ACLs, and if there are
+    # no existing ACLs then there's just nothing to do e bonanott
+    if not acls:
+        return
+    ls_data_raw = ovn.ovn_nbctl('find', 'Logical_Switch',
+                                'acls{>=}%s' % acls[0]['_uuid'])
+    ls_data = ovn.parse_ovn_nbctl_output(ls_data_raw)
+    ls_data = ls_data[0]
+    ls_name = ls_data['name'].strip('"')
+    for acl in acls:
+        if (not remove_default_drop and
+            int(acl['priority']) == constants.DEFAULT_ACL_PRIORITY):
+            # Do not drop the default drop rule
+            continue
+        ovn.ovn_nbctl('remove', 'Logical_Switch', ls_name,
+                      'acls', acl['_uuid'])
+
+
 def _remove_all_acls(pod_name):
-    old_acls_raw = ovn.ovn_nbctl('find', 'ACL',
-                                 'external_ids:pod_name=%s' % pod_name)
-    old_acls = ovn.parse_ovn_nbctl_output(old_acls_raw)
+    old_acls = _get_acls(pod_name)
     if not old_acls:
         # nothing to do - but log because it should never happen
         LOG.warn("No ACL found for pod:%s", pod_name)
         return
-    # For delete operations the logical port is unfortunately gone... but
-    # the logical switch can be found from existing ACLs, and if there are
-    # no existing ACLs then there's just nothing to do e bonanott
-    ls_data_raw = ovn.ovn_nbctl('find', 'Logical_Switch',
-                                'acls{>=}%s' % old_acls[0]['_uuid'])
-    ls_data = ovn.parse_ovn_nbctl_output(ls_data_raw)
-    ls_data = ls_data[0]
-    ls_name = ls_data['name'].strip('"')
-    for acl in old_acls:
-        ovn.ovn_nbctl('remove', 'Logical_Switch', ls_name,
-                      'acls', acl['_uuid'])
+    _remove_acls(old_acls, remove_default_drop=True)
     LOG.info("ACLs for Pod: %s removed", pod_name)
 
 
@@ -150,7 +164,9 @@ def process_namespace_isolation_off(events):
                                 namespace)
         selected_pods.extend([pod['metadata']['name'] for pod in pod_list])
     for pod in selected_pods:
+        current_acls = _get_acls(pod)
         _whitelist_pod_traffic(pod)
+        _remove_acls(current_acls)
     LOG.debug("Traffic for %d pods was whitelisted", len(selected_pods))
     return events
 
@@ -260,10 +276,13 @@ class PolicyProcessor(object):
                                             namespace)
                 ns_data['isolated'] = utils.is_namespace_isolated(namespace)
 
+            current_acls = _get_acls(pod)
             if not ns_data.get('isolated', False):
                 LOG.debug("Pod %s deployed in non-isolated namespace: %s."
                           "Whitelisting traffic", pod, namespace)
-            _whitelist_pod_traffic(pod)
+                _whitelist_pod_traffic(pod)
+            _remove_acls(current_acls)
+            LOG.debug("ACLs for Pod %s processed", pod)
 
         LOG.info("Event processing terminated. ACLs configured")
 
