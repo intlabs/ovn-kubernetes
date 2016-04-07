@@ -22,59 +22,6 @@ class Event(object):
         self.metadata = metadata
 
 
-def _process_ovn_db_change(row, action, external_ids):
-    pod_name = external_ids[constants.K8S_POD_NAME.lower()]
-    pod_ns = external_ids.get(constants.K8S_POD_NAMESPACE.lower(), 'default')
-    LOG.info("Processing OVN DB action '%s' for row %s - external_ids: %s",
-             action, row, external_ids)
-    old_acls_raw = ovn.ovn_nbctl('find', 'ACL',
-                                 'external_ids:pod_name=%s' % pod_name)
-    old_acls = ovn.parse_ovn_nbctl_output(old_acls_raw)
-    acls = []
-    if action != 'delete':
-        LOG.debug("Retrieving isolation status for namespace: %s", pod_ns)
-        if not _is_namespace_isolated(pod_ns):
-            LOG.debug("Namespace %s not isolated, whitelisting all traffic",
-                      pod_ns)
-            acls.append((constants.DEFAULT_ACL_PRIORITY,
-                         r'outport\=\=\"%s\"\ &&\ ip' % row,
-                         'allow-related'))
-            # Find lswitch for lport
-            ls_data_raw = ovn.ovn_nbctl('find', 'Logical_Switch',
-                                        'ports{>=}%s' % row)
-            ls_data = ovn.parse_ovn_nbctl_output(ls_data_raw)
-            ls_data = ls_data[0]
-            ls_name = ls_data['name'].strip('"')
-        else:
-            # Do policies only if isolation is on
-            LOG.debug("Retrieving policies in namespace ... for pod %s",
-                      pod_name)
-            LOG.debug("Fetching IP address for Pods in from clause")
-    elif old_acls:
-        # For delete operations the logical port is unfortunately gone... but
-        # the logical switch can be found from existing ACLs, and if there are
-        # no existing ACLs then there's just nothing to do e bonanott
-        ls_data_raw = ovn.ovn_nbctl('find', 'Logical_Switch',
-                                    'acls{>=}%s' % old_acls[0]['_uuid'])
-        ls_data = ovn.parse_ovn_nbctl_output(ls_data_raw)
-        ls_data = ls_data[0]
-        ls_name = ls_data['name'].strip('"')
-
-    # TODO(me): Program ACLs without leaving even a fraction of second in
-    # which the container is not secured
-    if acls:
-        LOG.debug("Implementing OVN ACLS for pod %s on lswitch %s",
-                  pod_name, ls_name)
-    for acl in acls:
-        ovn.create_ovn_acl(ls_name, pod_name, row, *acl)
-    LOG.debug("Removing existing ACLS for pod %s on lswitch %s",
-              pod_name, ls_name)
-    for acl in old_acls:
-        ovn.ovn_nbctl('remove', 'Logical_Switch', ls_name,
-                      'acls', acl['_uuid'])
-    LOG.info("ACLs for Pod: %s configured", pod_name)
-
-
 def _find_lswitch(lport_name):
     # Find lswitch for lport... to this aim we might use the port uuid
     lp_data_raw = ovn.ovn_nbctl('find', 'Logical_Port',
@@ -138,13 +85,46 @@ def _remove_all_acls(pod_name):
     LOG.info("ACLs for Pod: %s removed", pod_name)
 
 
+def _fetch_pod(pod, namespace):
+    """Retrieve a pod from the cache or the API server.
+
+    The routine invokes the API server in case a cache miss, but does
+    not update the cache.
+    """
+    pod_watcher = WATCHER_REGISTRY.k8s_pod_watcher
+    if not pod_watcher:
+        pod_data = None
+        LOG.warn("Pod watcher not set. This could be troublesome")
+    else:
+        pod_data = pod_watcher.pod_cache.get(pod)
+    if not pod_data:
+        # Note: the information needed are very likely to be in the
+        # event metadata. The code could be optimized by parsing those
+        # as well.
+        pod_data = k8s.get_pod(cfg.CONF.k8s_api_server_host,
+                               cfg.CONF.k8s_api_server_port,
+                               namespace, pod)
+    return pod_data
+
+
+def _fetch_namespace(namespace):
+    """Retrieve a namespace from the cache or the API server."""
+    ns_watcher = WATCHER_REGISTRY.k8s_ns_watcher
+    if not ns_watcher:
+        ns_data = None
+        LOG.warn("Namespace watcher not set. This could be troublesome")
+    else:
+        ns_data = ns_watcher.ns_cache.get(namespace)
+    if not ns_data:
+        ns_data = k8s.get_namespace(cfg.CONF.k8s_api_server_host,
+                                    cfg.CONF.k8s_api_server_port,
+                                    namespace)
+        ns_data['isolated'] = utils.is_namespace_isolated(namespace)
+    return ns_data
+
+
 def _find_policies_for_pod(pod_name, pod_namespace):
-    # TODO(me): See whether we could just use the cache rather than querying
-    # the server
-    pod_data = k8s.get_pod(cfg.CONF.k8s_api_server_host,
-                           cfg.CONF.k8s_api_server_port,
-                           pod_namespace,
-                           pod_name)
+    pod_data = _fetch_pod(pod_name, pod_namespace)
     if not pod_data:
         # no pod, hence no policies
         return []
@@ -167,7 +147,7 @@ def _find_policies_for_pod(pod_name, pod_namespace):
     return policies
 
 
-def process_namespace_isolation_off(events):
+def _process_namespace_isolation_off(events):
     """Whitelist all traffic for pod in non-isolated namespaces.
 
     Select namepace events from events, then find those where isolation
@@ -200,7 +180,7 @@ def process_namespace_isolation_off(events):
     return events
 
 
-def process_pod_deletion(events):
+def _process_pod_deletion(events):
     """Remove ACLs for deleted pods.
 
     This routine handles lport events for pod deletion, rather
@@ -219,6 +199,22 @@ def process_pod_deletion(events):
     return events
 
 
+def _process_pod_acls(pod, namespace):
+    LOG.debug("Processing ACLs for Pod: %s in namespace: %s",
+              pod, namespace)
+    pod_data = _fetch_pod(pod, namespace)
+    ns_data = _fetch_namespace(namespace)
+    current_acls = _get_acls(pod)
+    if not ns_data.get('isolated', False):
+        LOG.debug("Pod %s deployed in non-isolated namespace: %s."
+                  "Whitelisting traffic", pod, namespace)
+        _whitelist_pod_traffic(pod)
+    else:
+        LOG.debug("Applying ACLs to Pod: %s", pod_data['metadata']['name'])
+    _remove_acls(current_acls)
+    LOG.debug("ACLs for Pod %s processed", pod)
+
+
 class PolicyProcessor(object):
 
     _instance = None
@@ -232,24 +228,58 @@ class PolicyProcessor(object):
             cls._instance = cls()
         return cls._instance
 
+    def _process_pod_event(self, event, pod_ns_map, affected_pods):
+        pod_name = event.metadata['metadata']['name']
+        pod_ns_map[pod_name] = event.metadata['metadata']['namespace']
+        if event.event_type != constants.POD_DEL:
+            affected_pods.setdefault(pod_name, []).append(event)
+        # Find policies whoe PodSelector matches this pod
+        affected_policies = _find_policies_for_pod(
+            pod_name, pod_ns_map[pod_name])
+        if affected_policies:
+            LOG.debug("Pod event affects %d network policies."
+                      "Generatingpolicy events", len(affected_policies))
+        else:
+            LOG.debug("The pod event does not affect any network "
+                      "policy. No further processing needed")
+        # For each policy generate a policy update event and send it
+        # back to the queue
+        policy_events = [(constants.NP_EVENT_PRIORITY,
+                          Event(constants.NP_UPDATE,
+                                policy['metadata']['name'],
+                                policy['metadata']))
+                         for policy in affected_policies]
+        for policy_event in policy_events:
+            get_event_queue().put(policy_event)
+
+    def _process_ns_event(self, event, pod_ns_map, affected_pods):
+        namespace = event.source
+        # TODO(me): Use the cache rather than querying the server
+        ns_pods = k8s.get_pods(cfg.CONF.k8s_api_server_host,
+                               cfg.CONF.k8s_api_server_port,
+                               namespace)
+        for pod in ns_pods:
+            pod_ns_map[pod] = namespace
+            affected_pods.setdefault(pod, []).append(event)
+
     def process_events(self, events):
         # Compile pod list PL where policies are applied. Also include pods
         # from new lport events.
-        # namespace events on->off: immediately whitelist traffic for all
-        # corresponding pods in PL; remove items from PL
+        # namespace events on->off: immediately whitelist traffic for all pods
+        # in the namespace
         # namespace events off->on: add items to PL
         # if PL is empty goodbye
-        # policy por pod event -> rebuild pseudo-acl list
+        # policy event -> rebuild pseudo-acl lis
         # for each element in PL -> apply OVN acls from pseudo-acl list
         LOG.debug("Processing %d events from queue", len(events))
         # The easy bits first. Whitelist all traffic for pod in namespaces
         # where isolation was turned off
-        events = process_namespace_isolation_off(events)
+        events = _process_namespace_isolation_off(events)
         LOG.debug("Pod whitelisting performed. %d events remaining",
                   len(events))
         if not events:
             return
-        events = process_pod_deletion(events)
+        events = _process_pod_deletion(events)
         LOG.debug("ACLs for removed PODs deleted. %d events remaining",
                   len(events))
         if not events:
@@ -269,30 +299,7 @@ class PolicyProcessor(object):
             if event.event_type in (constants.POD_ADD,
                                     constants.POD_UPDATE,
                                     constants.POD_DEL):
-                pod_name = event.metadata['metadata']['name']
-                pod_ns_map[pod_name] = (
-                    event.metadata['metadata']['namespace'])
-                if event.event_type != constants.POD_DEL:
-                    affected_pods.setdefault(pod_name, []).append(event)
-                # TODO(me): Find policies matching this pod
-                affected_policies = _find_policies_for_pod(
-                    pod_name, pod_ns_map[pod_name])
-                if affected_policies:
-                    LOG.debug("Pod event affects %d network policies."
-                              "Generating appropriate events",
-                              len(affected_policies))
-                else:
-                    LOG.debug("The pod event does not affect any network "
-                              "policy. No further processing needed")
-                # For each policy generate a policy update event and send it
-                # back to the queue
-                policy_events = [(constants.NP_EVENT_PRIORITY,
-                                  Event(constants.NP_UPDATE,
-                                        policy['metadata']['name'],
-                                        policy['metadata']))
-                                 for policy in affected_policies]
-                for policy_event in policy_events:
-                    get_event_queue().put(policy_event)
+                self._process_pod_event(event, pod_ns_map, affected_pods)
                 if event.event_type == constants.POD_DEL:
                     events.remove(event)
             elif event.event_type == constants.LPORT_ADD:
@@ -301,60 +308,16 @@ class PolicyProcessor(object):
                 affected_pods.setdefault(pod_name, []).append(event)
             elif event.event_type == constants.NS_UPDATE:
                 # This event must be transition off->on for isolation
-                # TODO(me): check whether it is safe to just use the cache. In
-                # the meanwhile query the server
-                namespace = event.source
-                ns_pods = k8s.get_pods(cfg.CONF.k8s_api_server_host,
-                                       cfg.CONF.k8s_api_server_port,
-                                       namespace)
-                for pod in ns_pods:
-                    pod_ns_map[pod] = namespace
-                    affected_pods.setdefault(pod, []).append(event)
+                self._process_ns_event(event, pod_ns_map, affected_pods)
             elif event.event_type in (constants.NP_ADD,
                                       constants.NP_UPDATE,
                                       constants.NP_DEL):
                 # TODO(me): Find pods that match policies
                 pass
 
-        pod_watcher = WATCHER_REGISTRY.k8s_pod_watcher
-        if not pod_watcher:
-            LOG.warn("Pod watcher not set. Unable to program ACLs")
-            # TODO(me): Decide whether this should trigger exception
-            return
-        ns_watcher = WATCHER_REGISTRY.k8s_ns_watcher
-        if not ns_watcher:
-            LOG.warn("Namespace watcher not set. Unable to program ACLs")
-            # TODO(me): Decide whether this should trigger exception
-            return
-
-        pod_cache = pod_watcher.pod_cache
-        ns_cache = ns_watcher.ns_cache
         for pod, events in affected_pods.items():
             namespace = pod_ns_map[pod]
-            pod_data = pod_cache.get(pod)
-            LOG.debug("Processing ACLs for Pod: %s in namespace: %s",
-                      pod, namespace)
-            if not pod_data:
-                # Note: the information needed are very likely to be in the
-                # event metadata. The code could be optimized by parsing those
-                # as well.
-                pod_data = k8s.get_pod(cfg.CONF.k8s_api_server_host,
-                                       cfg.CONF.k8s_api_server_port,
-                                       namespace, pod)
-            ns_data = ns_cache.get(namespace)
-            if not ns_data:
-                ns_data = k8s.get_namespace(cfg.CONF.k8s_api_server_host,
-                                            cfg.CONF.k8s_api_server_port,
-                                            namespace)
-                ns_data['isolated'] = utils.is_namespace_isolated(namespace)
-
-            current_acls = _get_acls(pod)
-            if not ns_data.get('isolated', False):
-                LOG.debug("Pod %s deployed in non-isolated namespace: %s."
-                          "Whitelisting traffic", pod, namespace)
-                _whitelist_pod_traffic(pod)
-            _remove_acls(current_acls)
-            LOG.debug("ACLs for Pod %s processed", pod)
+            _process_pod_acls(pod, namespace)
         for event in events:
             LOG.warn("Event %s from %s was not processed. ACLs might not be "
                      "in sync with network policies",
