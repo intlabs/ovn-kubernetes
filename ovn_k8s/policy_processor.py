@@ -282,6 +282,11 @@ class PolicyProcessor(object):
     def _process_np_event(self, event, pod_ns_map, affected_pods):
         namespace = event.metadata['metadata']['namespace']
         policy = event.source
+        ns_data = _fetch_namespace(namespace)
+        if not ns_data['isolated']:
+            LOG.warn("Policy %s applied to non-isolated namespace:%s."
+                     "Skipping processing", policy, namespace)
+            return
         policy_data = _fetch_network_policy(policy, namespace)
         # Retrieve pods matching policy selector
         # TODO: use pod cache, even if doing the selector query is so easy
