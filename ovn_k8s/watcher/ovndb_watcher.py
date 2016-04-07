@@ -26,6 +26,10 @@ class OvndbWatcher(object):
     """Watch ovsdb-client monitor output and generate events."""
 
     def __init__(self, monitor_output):
+        # Store events which have already been sent to avoid sending dupes
+        # TODO(me): expire entries for deleted lports at some point to avoid
+        # this list grown infinetely
+        self._sent_events = {}
         self.monitor_output = monitor_output
 
     def _parse_line(self, line, updated_row=None):
@@ -49,11 +53,18 @@ class OvndbWatcher(object):
         return row, action, external_ids_raw
 
     def _send_event(self, row, action, external_ids):
-        event = pp.Event(ACTION_EVENT_MAP[action],
+        event_type = ACTION_EVENT_MAP[action]
+        sent_events = self._sent_events.get(row, [])
+        if event_type in sent_events:
+            LOG.debug("Event %s for lport %s already sent, skipping",
+                      event_type, row)
+            return
+        event = pp.Event(event_type,
                          source=row,
                          metadata=external_ids)
         pp.get_event_queue().put((constants.LPORT_EVENT_PRIORITY,
                                   event))
+        self._sent_events.setdefault(row, []).append(event_type)
 
     def process(self):
         line = self.monitor_output.readline()
