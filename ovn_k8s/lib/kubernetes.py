@@ -76,6 +76,20 @@ def get_pod(host, port, namespace, pod_name):
     return resource.json()
 
 
+def get_network_policies(host, port, namespace):
+    # Use API path for 3rd party resource
+    url = ("http://%s:%d/apis/experimental.kubernetes.io/v1/namespaces/"
+           "%s/networkpolicys") % (host, port, namespace)
+    response = requests.get(url)
+    if response.status_code != 200:
+        # TODO(me): raise here
+        return
+    resources = response.json()
+    if not resources:
+        return []
+    return resources['items']
+
+
 def get_namespace(host, port, name):
     resource = _get_resource(host, port, 'namespaces', name)
     if not resource:

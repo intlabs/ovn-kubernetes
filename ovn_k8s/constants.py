@@ -31,7 +31,7 @@ POD_DEL = 'pod_del'
 POD_UPDATE = 'pod_update'
 NP_ADD = 'network_policy_add'
 NP_DEL = 'network_policy_delete'
-NP_UPDATE = 'network_policicy_update'
+NP_UPDATE = 'network_policy_update'
 NS_UPDATE = 'namespace_update'
 
 EVENT_PRIORITIES = {
