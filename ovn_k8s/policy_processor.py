@@ -281,6 +281,7 @@ class PolicyProcessor(object):
             pod_name = pod['metadata']['name']
             pod_ns_map[pod_name] = namespace
             affected_pods.setdefault(pod_name, []).append(event)
+        return ns_pods
 
     def _process_np_event(self, event, pod_ns_map, affected_pods):
         namespace = event.metadata['metadata']['namespace']
@@ -307,6 +308,7 @@ class PolicyProcessor(object):
         ports_changed = event.metadata.get('ports_changed', False)
         if from_changed or ports_changed:
             self._dirty_policies[policy] = (from_changed, ports_changed)
+        return pods
 
     def _rebuild_pseudo_acl(self, policy, from_changed, ports_changed):
         # Build pseudo ACL list for policy
@@ -419,18 +421,25 @@ class PolicyProcessor(object):
                                     constants.POD_DEL):
                 self._process_pod_event(event, pod_ns_map, affected_pods)
                 if event.event_type == constants.POD_DEL:
-                    events._remove(event)
+                    events.remove(event)
             elif event.event_type == constants.LPORT_ADD:
                 pod_name = event.metadata['pod_name']
                 pod_ns_map[pod_name] = event.metadata['ns_name']
                 affected_pods.setdefault(pod_name, []).append(event)
             elif event.event_type == constants.NS_UPDATE:
                 # This event must be transition off->on for isolation
-                self._process_ns_event(event, pod_ns_map, affected_pods)
+                if not self._process_ns_event(event, pod_ns_map,
+                                              affected_pods):
+                    # It is ok to remove the event as no pods were affected
+                    events.remove(event)
             elif event.event_type in (constants.NP_ADD,
                                       constants.NP_UPDATE,
                                       constants.NP_DEL):
-                self._process_np_event(event, pod_ns_map, affected_pods)
+                if not self._process_np_event(event, pod_ns_map,
+                                              affected_pods):
+                    # It is ok to remove the event as no pods were affected
+                    events.remove(event)
+
         for policy in self._dirty_policies:
             self._rebuild_pseudo_acl(policy,
                                      *self._dirty_policies[policy])
