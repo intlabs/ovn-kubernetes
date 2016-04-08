@@ -16,6 +16,7 @@ K8S_ISOLATION_ANN = 'net.alpha.kubernetes.io/network-isolation'
 KUBELET_PORT = 10255
 
 DEFAULT_ALLOW_ACL_PRIORITY = 9999
+STANDARD_ACL_PRIORITY = 1099
 DEFAULT_ACL_PRIORITY = 1001
 
 # Constants for policy events

@@ -46,7 +46,6 @@ def _whitelist_pod_traffic(pod_name):
                      'allow-related')
     ls_name = _find_lswitch(lport_name)
     ovn.create_ovn_acl(ls_name, pod_name, lport_name, *whitelist_acl)
-    LOG.info("ACLs for Pod: %s configured", pod_name)
 
 
 def _get_acls(pod_name):
@@ -123,7 +122,7 @@ def _fetch_namespace(namespace):
     return ns_data
 
 
-def _fetch_network_policy(network_policy, namespace):
+def _fetch_network_policy(network_policy, namespace=None):
     """Retrieve a policy from the cache or the API server."""
     np_watcher = WATCHER_REGISTRY.k8s_np_watcher
     if not np_watcher:
@@ -216,27 +215,16 @@ def _process_pod_deletion(events):
     return events
 
 
-def _process_pod_acls(pod, namespace):
-    LOG.debug("Processing ACLs for Pod: %s in namespace: %s",
-              pod, namespace)
-    pod_data = _fetch_pod(pod, namespace)
-    ns_data = _fetch_namespace(namespace)
-    current_acls = _get_acls(pod)
-    if not ns_data.get('isolated', False):
-        LOG.debug("Pod %s deployed in non-isolated namespace: %s."
-                  "Whitelisting traffic", pod, namespace)
-        _whitelist_pod_traffic(pod)
-    else:
-        LOG.debug("Applying ACLs to Pod: %s", pod_data['metadata']['name'])
-    _remove_acls(current_acls)
-    LOG.debug("ACLs for Pod %s processed", pod)
-
-
 class PolicyProcessor(object):
 
     _instance = None
 
     def __init__(self):
+        # Map policy with a list of pseudo-acls. Each of these pseduo-acls is
+        # just a tuple with priority, port/protocol match, source ip match,
+        # and action
+        self._pseudo_acls = {}
+        self._dirty_policies = {}
         self.event_queue = queue.PriorityQueue()
 
     @classmethod
@@ -276,8 +264,9 @@ class PolicyProcessor(object):
                                cfg.CONF.k8s_api_server_port,
                                namespace)
         for pod in ns_pods:
-            pod_ns_map[pod] = namespace
-            affected_pods.setdefault(pod, []).append(event)
+            pod_name = pod['metadata']['name']
+            pod_ns_map[pod_name] = namespace
+            affected_pods.setdefault(pod_name, []).append(event)
 
     def _process_np_event(self, event, pod_ns_map, affected_pods):
         namespace = event.metadata['metadata']['namespace']
@@ -300,6 +289,92 @@ class PolicyProcessor(object):
             pod_name = pod['metadata']['name']
             pod_ns_map[pod_name] = namespace
             affected_pods.setdefault(pod_name, []).append(event)
+        from_changed = event.metadata.get('from_changed', False)
+        ports_changed = event.metadata.get('ports_changed', False)
+        if from_changed or ports_changed:
+            self._dirty_policies[policy] = (from_changed, ports_changed)
+
+    def _rebuild_pseudo_acl(self, policy, from_changed, ports_changed):
+        # Build pseudo ACL list for policy
+        pseudo_acl = self._pseudo_acls.get(
+            policy,
+            (constants.STANDARD_ACL_PRIORITY,
+             [],
+             [],
+             'allow-related'))
+        policy_data = _fetch_network_policy(policy)
+        # Note: For the time being simplofy by assuming one ingress rule per
+        # policy
+        if ports_changed:
+            ports_data = policy_data['ingress'][0].get('ports', [])
+            protocol_ports = []
+            LOG.debug("#### PORTS data:%s", ports_data)
+            for item in ports_data:
+                protocol_ports.append((item['protocol'], item['port']))
+        if from_changed:
+            from_data = policy_data['ingress'][0].get('from', [])
+            LOG.debug("#### FROM data:%s", from_data)
+            # TODO(me): The whole from logic
+            src_pod_ips = []
+        pseudo_acl = (constants.STANDARD_ACL_PRIORITY,
+                      ports_changed and protocol_ports or pseudo_acl[1],
+                      from_changed and src_pod_ips or pseudo_acl[2],
+                      'allow-related')
+        self._pseudo_acls[policy] = pseudo_acl
+        return pseudo_acl
+
+    def _apply_pod_acls(self, pod, namespace):
+        for policy_name in [policy['metadata']['name'] for policy in
+                            _find_policies_for_pod(pod, namespace)]:
+            try:
+                pseudo_acl = self._pseudo_acls[policy_name]
+            except KeyError:
+                LOG.debug("Pseudo ACLs for policy:%s not yet generated",
+                            policy_name)
+                pseudo_acl = self._rebuild_pseudo_acl(
+                    policy_name, True, True)
+            LOG.debug("### Creating match for pseudo acl:%s", pseudo_acl)
+            # NOTE: We do not validate that the protocol names are valid
+            ports_clause = pseudo_acl[1]
+            protocol_port_map = {}
+            for (protocol, port) in ports_clause:
+                protocol_port_map.setdefault(protocol, set()).add(port)
+            ports_match = "\ &&\ ".join([r"%s.dst\=\=\{%s\}" % (
+                                         protocol.lower(), ",".join(ports))
+                                         for (protocol, ports) in
+                                         protocol_port_map.items()])
+            lport_data_raw = ovn.ovn_nbctl(
+                'find', 'Logical_Port', 'external_ids:pod_name=%s' % pod)
+            lport_data = ovn.parse_ovn_nbctl_output(lport_data_raw)
+            lport_data = lport_data[0]
+            lport_name = lport_data['name'].strip('"')
+            outport_match = r'outport\=\=\"%s\"\ &&\ ip' % lport_name
+            if ports_match:
+                match = r'%s\ &&\ %s' % (outport_match, ports_match)
+            else:
+                match = outport_match
+                LOG.debug("Policy: %s - ACL match: %s", policy_name, match)
+            ovn_acl_data = (pseudo_acl[0], match, pseudo_acl[3])
+            # TODO(me): lswitch & lport can be easily cached: pods don't move
+            ls_name = _find_lswitch(lport_name)
+            ovn.create_ovn_acl(ls_name, pod, lport_name, *ovn_acl_data)
+
+    def _process_pod_acls(self, pod, namespace):
+        LOG.debug("Processing ACLs for Pod: %s in namespace: %s",
+                pod, namespace)
+        pod_data = _fetch_pod(pod, namespace)
+        ns_data = _fetch_namespace(namespace)
+        current_acls = _get_acls(pod)
+        if not ns_data.get('isolated', False):
+            LOG.debug("Pod %s deployed in non-isolated namespace: %s."
+                    "Whitelisting traffic", pod, namespace)
+            _whitelist_pod_traffic(pod)
+        else:
+            LOG.debug("Applying ACLs to Pod: %s", pod_data['metadata']['name'])
+            self._apply_pod_acls(pod, namespace)
+
+        _remove_acls(current_acls)
+        LOG.debug("ACLs for Pod %s processed", pod)
 
     def process_events(self, events):
         # Compile pod list PL where policies are applied. Also include pods
@@ -352,14 +427,24 @@ class PolicyProcessor(object):
                                       constants.NP_UPDATE,
                                       constants.NP_DEL):
                 self._process_np_event(event, pod_ns_map, affected_pods)
-
-        for pod, events in affected_pods.items():
+        for policy in self._dirty_policies:
+            self._rebuild_pseudo_acl(policy,
+                                     *self._dirty_policies[policy])
+        for pod, pod_events in affected_pods.items():
             LOG.debug("Rebuilding ACL for pod:%s because of:%s",
                       pod, "; ".join(['%s from %s' % (event.event_type,
                                                       event.source)
                                       for event in events]))
             namespace = pod_ns_map[pod]
-            _process_pod_acls(pod, namespace)
+            self._process_pod_acls(pod, namespace)
+            for pod_event in pod_events:
+                try:
+                    events.remove(pod_event)
+                except ValueError:
+                    # Don't mind as many pods might be affected by the same
+                    # event
+                    pass
+
         for event in events:
             LOG.warn("Event %s from %s was not processed. ACLs might not be "
                      "in sync with network policies",

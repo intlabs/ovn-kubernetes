@@ -36,7 +36,7 @@ class NetworkPolicyWatcher(object):
 
     def __init__(self):
         self.np_cache = {}
-        self._ns_np_map = {}
+        self.np_ns_map = {}
         self._np_watcher_threads = {}
         self.notifications = queue.Queue()
 
@@ -58,17 +58,16 @@ class NetworkPolicyWatcher(object):
 
         np_watcher_thread = greenthread.spawn(_process_loop)
         self._np_watcher_threads[namespace] = np_watcher_thread
-        self._ns_np_map[namespace] = []
 
     def remove_namespace(self, namespace):
         np_watcher_thread = self._np_watcher_threads[namespace]
         greenthread.kill(np_watcher_thread)
         del self._np_watcher_threads[namespace]
-        ns_policies = self._ns_np_map[namespace]
-        policy_names = [policy['metadata']['name'] for policy in ns_policies]
+        policy_names = [policy for (policy, ns)
+                        in self.np_ns_map.items()
+                        if namespace == ns]
         for policy_name in policy_names:
             del self.np_cache[policy_name]
-        del self._ns_np_map[namespace]
 
     def _send_event(self, np_name, event_type, **kwargs):
         event_metadata = self.np_cache[np_name]
@@ -105,15 +104,18 @@ class NetworkPolicyWatcher(object):
             old_ports = cached_np.get('Ports')
             current_ports = np_data.get('Ports')
             ports_changed = (old_ports != current_ports)
-        self.np_cache[np_name] = np_data
         if (not cached_np or pod_selector_changed or
             from_changed or ports_changed):
             # There are changes that need to be processed
+            self.np_cache[np_name] = np_data
+            self.np_ns_map[np_name] = ns_name
             self._send_event(np_name, event_type,
                              pod_selector_changed=pod_selector_changed,
                              from_changed=from_changed,
                              ports_changed=ports_changed)
         elif event_type == 'DELETED':
+            # TODO(me): At some point the policy should be removed from the
+            # cache
             self._send_event(np_name, event_type)
 
     def process(self):
