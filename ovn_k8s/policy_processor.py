@@ -139,16 +139,17 @@ def _fetch_network_policy(network_policy, namespace=None):
     return np_data
 
 
-def _find_policies_for_pod(pod_name, pod_namespace):
+def _find_policies_for_pod(pod_name, pod_namespace, policies=None):
     pod_data = _fetch_pod(pod_name, pod_namespace)
     if not pod_data:
         # no pod, hence no policies
         return []
     pod_labels = pod_data['metadata'].get('labels', {})
-    # TODO(me): Use cached policies?
-    policies = k8s.get_network_policies(cfg.CONF.k8s_api_server_host,
-                                        cfg.CONF.k8s_api_server_port,
-                                        pod_namespace)
+    # TODO(me): Use cached policies?i
+    if not policies:
+        policies = k8s.get_network_policies(cfg.CONF.k8s_api_server_host,
+                                            cfg.CONF.k8s_api_server_port,
+                                            pod_namespace)
     for policy in policies[:]:
         pod_selector = policy.get('podSelector')
         # TODO(me): Implement not only equality based selectors
@@ -321,9 +322,10 @@ class PolicyProcessor(object):
         self._pseudo_acls[policy] = pseudo_acl
         return pseudo_acl
 
-    def _apply_pod_acls(self, pod, namespace):
+    def _apply_pod_acls(self, pod, namespace, network_policies):
         for policy_name in [policy['metadata']['name'] for policy in
-                            _find_policies_for_pod(pod, namespace)]:
+                            _find_policies_for_pod(pod, namespace,
+                                                   network_policies)]:
             try:
                 pseudo_acl = self._pseudo_acls[policy_name]
             except KeyError:
@@ -356,7 +358,7 @@ class PolicyProcessor(object):
             ls_name = _find_lswitch(lport_name)
             ovn.create_ovn_acl(ls_name, pod, lport_name, *ovn_acl_data)
 
-    def _process_pod_acls(self, pod, namespace):
+    def _process_pod_acls(self, pod, namespace, network_policies):
         LOG.debug("Processing ACLs for Pod: %s in namespace: %s",
                 pod, namespace)
         pod_data = _fetch_pod(pod, namespace)
@@ -368,7 +370,7 @@ class PolicyProcessor(object):
             _whitelist_pod_traffic(pod)
         else:
             LOG.debug("Applying ACLs to Pod: %s", pod_data['metadata']['name'])
-            self._apply_pod_acls(pod, namespace)
+            self._apply_pod_acls(pod, namespace, network_policies)
 
         _remove_acls(current_acls)
         LOG.debug("ACLs for Pod %s processed", pod)
@@ -427,13 +429,23 @@ class PolicyProcessor(object):
         for policy in self._dirty_policies:
             self._rebuild_pseudo_acl(policy,
                                      *self._dirty_policies[policy])
+        network_policies = []
         for pod, pod_events in affected_pods.items():
+            # Load network policies only once for all pods. In theory it should
+            # be possible to use the cache in the network policy watcher,
+            # however as the cache might not be reliable, especially at
+            # startup, the policies will be fetched from the API server here
+            namespace = pod_ns_map[pod]
+            if not network_policies:
+                network_policies = k8s.get_network_policies(
+                    cfg.CONF.k8s_api_server_host,
+                    cfg.CONF.k8s_api_server_port,
+                    namespace)
             LOG.debug("Rebuilding ACL for pod:%s because of:%s",
                       pod, "; ".join(['%s from %s' % (event.event_type,
                                                       event.source)
                                       for event in events]))
-            namespace = pod_ns_map[pod]
-            self._process_pod_acls(pod, namespace)
+            self._process_pod_acls(pod, namespace, network_policies)
             for pod_event in pod_events:
                 try:
                     events.remove(pod_event)
