@@ -308,12 +308,10 @@ class PolicyProcessor(object):
         if ports_changed:
             ports_data = policy_data['ingress'][0].get('ports', [])
             protocol_ports = []
-            LOG.debug("#### PORTS data:%s", ports_data)
             for item in ports_data:
                 protocol_ports.append((item['protocol'], item['port']))
         if from_changed:
             from_data = policy_data['ingress'][0].get('from', [])
-            LOG.debug("#### FROM data:%s", from_data)
             # TODO(me): The whole from logic
             src_pod_ips = []
         pseudo_acl = (constants.STANDARD_ACL_PRIORITY,
@@ -333,7 +331,6 @@ class PolicyProcessor(object):
                             policy_name)
                 pseudo_acl = self._rebuild_pseudo_acl(
                     policy_name, True, True)
-            LOG.debug("### Creating match for pseudo acl:%s", pseudo_acl)
             # NOTE: We do not validate that the protocol names are valid
             ports_clause = pseudo_acl[1]
             protocol_port_map = {}
