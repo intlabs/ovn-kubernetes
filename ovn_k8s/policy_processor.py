@@ -257,7 +257,7 @@ class PolicyProcessor(object):
             pod_name, pod_ns_map[pod_name])
         if affected_policies:
             LOG.debug("Pod event affects %d network policies."
-                      "Generatingpolicy events", len(affected_policies))
+                      "Generating policy events", len(affected_policies))
         else:
             LOG.debug("The pod event does not affect any network "
                       "policy. No further processing needed")
@@ -370,8 +370,6 @@ class PolicyProcessor(object):
             ovn.create_ovn_acl(ls_name, pod, lport_name, *ovn_acl_data)
 
     def _process_pod_acls(self, pod, namespace, network_policies):
-        LOG.debug("Processing ACLs for Pod: %s in namespace: %s",
-                pod, namespace)
         pod_data = _fetch_pod(pod, namespace)
         ns_data = _fetch_namespace(namespace)
         current_acls = _get_acls(pod)
@@ -399,13 +397,9 @@ class PolicyProcessor(object):
         # The easy bits first. Whitelist all traffic for pod in namespaces
         # where isolation was turned off
         events = _process_namespace_isolation_off(events)
-        LOG.debug("Pod whitelisting performed. %d events remaining",
-                  len(events))
         if not events:
             return
         events = _process_pod_deletion(events)
-        LOG.debug("ACLs for removed PODs deleted. %d events remaining",
-                  len(events))
         if not events:
             return
 
