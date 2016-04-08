@@ -1,11 +1,8 @@
 import shlex
 
 from oslo_config import cfg
-from oslo_log import log
 
 from ovn_k8s import utils
-
-LOG = log.getLogger(__name__)
 
 
 def call_prog(args):
@@ -38,7 +35,6 @@ def ovn_nbctl(*args):
         ovn_remote = None
     if not ovn_remote:
         ovn_remote = _get_ovn_remote()
-    LOG.debug("Using OVN remote:%s", ovn_remote)
     db_option = "%s=%s" % ("--db", ovn_remote)
     args = ('ovn-nbctl', db_option) + args
     return call_prog(args)
