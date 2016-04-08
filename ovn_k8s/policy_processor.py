@@ -22,29 +22,22 @@ class Event(object):
         self.metadata = metadata
 
 
-def _find_lswitch(lport_name):
-    # Find lswitch for lport... to this aim we might use the port uuid
-    lp_data_raw = ovn.ovn_nbctl('find', 'Logical_Port',
-                                'name=%s' % lport_name)
-    lp_data = ovn.parse_ovn_nbctl_output(lp_data_raw)
-    lp_data = lp_data[0]
+def _find_lswitch(lport_uuid):
     ls_data_raw = ovn.ovn_nbctl('find', 'Logical_Switch',
-                                'ports{>=}%s' % lp_data['_uuid'])
+                                'ports{>=}%s' % lport_uuid)
     ls_data = ovn.parse_ovn_nbctl_output(ls_data_raw)
     ls_data = ls_data[0]
     return ls_data['name'].strip('"')
 
 
 def _whitelist_pod_traffic(pod_name):
-    lport_data_raw = ovn.ovn_nbctl(
-        'find', 'Logical_Port', 'external_ids:pod_name=%s' % pod_name)
-    lport_data = ovn.parse_ovn_nbctl_output(lport_data_raw)
-    lport_data = lport_data[0]
+    lport_data = _fetch_lport(pod_name)
+    lport_uuid = lport_data['_uuid'].strip('"')
     lport_name = lport_data['name'].strip('"')
     whitelist_acl = (constants.DEFAULT_ALLOW_ACL_PRIORITY,
                      r'outport\=\=\"%s\"\ &&\ ip' % lport_name,
                      'allow-related')
-    ls_name = _find_lswitch(lport_name)
+    ls_name = _find_lswitch(lport_uuid)
     ovn.create_ovn_acl(ls_name, pod_name, lport_name, *whitelist_acl)
 
 
@@ -82,6 +75,26 @@ def _remove_all_acls(pod_name):
         return
     _remove_acls(old_acls, remove_default_drop=True)
     LOG.info("ACLs for Pod: %s removed", pod_name)
+
+
+def _fetch_lport(pod):
+    """Retrieve a logical from the cache or the OVN NB DB.
+
+    The routine invokes OVN in case a cache miss, but does not
+    update the cache.
+    """
+    ovndb_watcher = WATCHER_REGISTRY.ovndb_watcher
+    if not ovndb_watcher:
+        lport_data = None
+        LOG.warn("OVN DB watcher not set. This could be troublesome")
+    else:
+        lport_data = ovndb_watcher.port_cache.get(pod)
+    if not lport_data:
+        lport_data_raw = ovn.ovn_nbctl(
+            'find', 'Logical_Port', 'external_ids:pod_name=%s' % pod)
+        lport_data = ovn.parse_ovn_nbctl_output(lport_data_raw)
+        lport_data = lport_data[0]
+    return lport_data
 
 
 def _fetch_pod(pod, namespace):
@@ -342,10 +355,8 @@ class PolicyProcessor(object):
                                          protocol.lower(), ",".join(ports))
                                          for (protocol, ports) in
                                          protocol_port_map.items()])
-            lport_data_raw = ovn.ovn_nbctl(
-                'find', 'Logical_Port', 'external_ids:pod_name=%s' % pod)
-            lport_data = ovn.parse_ovn_nbctl_output(lport_data_raw)
-            lport_data = lport_data[0]
+            lport_data = _fetch_lport(pod)
+            lport_uuid = lport_data['_uuid'].strip('"')
             lport_name = lport_data['name'].strip('"')
             outport_match = r'outport\=\=\"%s\"\ &&\ ip' % lport_name
             if ports_match:
@@ -355,7 +366,7 @@ class PolicyProcessor(object):
                 LOG.debug("Policy: %s - ACL match: %s", policy_name, match)
             ovn_acl_data = (pseudo_acl[0], match, pseudo_acl[3])
             # TODO(me): lswitch & lport can be easily cached: pods don't move
-            ls_name = _find_lswitch(lport_name)
+            ls_name = _find_lswitch(lport_uuid)
             ovn.create_ovn_acl(ls_name, pod, lport_name, *ovn_acl_data)
 
     def _process_pod_acls(self, pod, namespace, network_policies):
@@ -414,7 +425,7 @@ class PolicyProcessor(object):
                                     constants.POD_DEL):
                 self._process_pod_event(event, pod_ns_map, affected_pods)
                 if event.event_type == constants.POD_DEL:
-                    events.remove(event)
+                    events._remove(event)
             elif event.event_type == constants.LPORT_ADD:
                 pod_name = event.metadata['pod_name']
                 pod_ns_map[pod_name] = event.metadata['ns_name']

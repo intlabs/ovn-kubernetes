@@ -2,6 +2,7 @@ import re
 
 from oslo_log import log
 from ovn_k8s import constants
+from ovn_k8s.lib import ovn
 from ovn_k8s import policy_processor as pp
 
 LOG = log.getLogger(__name__)
@@ -31,6 +32,8 @@ class OvndbWatcher(object):
         # this list grown infinetely
         self._sent_events = {}
         self.monitor_output = monitor_output
+        # This cache will associate a pod with its logical port
+        self.port_cache = {}
 
     def _parse_line(self, line, updated_row=None):
         items = re.findall(r"\[.*?\]|\{.*?\}|\s*?[^\s\[\{\}\]]+?\s", line)
@@ -82,5 +85,14 @@ class OvndbWatcher(object):
             elif action not in ('initial', 'new', 'delete'):
                 return
             external_ids = _build_external_ids_dict(external_ids_raw)
-            if 'pod_name' in external_ids:
+            pod_name = external_ids.get('pod_name')
+            if pod_name:
+                if action != 'delete':
+                    lport_data_raw = ovn.ovn_nbctl(
+                        'list', 'Logical_Port', row)
+                    lport_data = ovn.parse_ovn_nbctl_output(lport_data_raw)
+                    lport_data = lport_data[0]
+                    self.port_cache[external_ids['pod_name']] = lport_data
+                else:
+                    del self.port_cache[external_ids['pod_name']]
                 self._send_event(row, action, external_ids)
