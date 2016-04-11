@@ -65,13 +65,16 @@ def parse_ovn_nbctl_output(data, scalar=False):
     return items
 
 
-def create_ovn_acl(ls_name, pod_name, lport_name, priority, match, action):
+def create_ovn_acl(ls_name, pod_name, lport_name, priority, match, action,
+                   **kwargs):
     # Note: The reason rather complicated expression is to be able to set
     # an external id for the ACL as well (acl-add won't return the ACL id)
+    kwargs['pod_name'] = pod_name
+    external_ids = " ".join('external_ids:%s=%s' % (k, v)
+                            for k, v in kwargs.items())
     command = ('-- --id=@acl_id create ACL action=%s direction=to-lport '
                'priority=%d match="%s" external_ids:lport_name=%s '
-               'external_ids:pod_name=%s -- '
-               'add Logical_Switch %s acls @acl_id' %
-               (action, priority, match, lport_name, pod_name, ls_name))
+               '%s -- add Logical_Switch %s acls @acl_id' %
+               (action, priority, match, lport_name, external_ids, ls_name))
     command_items = tuple(shlex.split(command))
     ovn_nbctl(*command_items)

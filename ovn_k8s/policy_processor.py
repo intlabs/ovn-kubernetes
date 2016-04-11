@@ -325,11 +325,55 @@ class PolicyProcessor(object):
             ports_data = policy_data['ingress'][0].get('ports', [])
             protocol_ports = []
             for item in ports_data:
-                protocol_ports.append((item['protocol'], item['port']))
+                protocol_ports.append((item['protocol'], item.get('port')))
         if from_changed:
-            from_data = policy_data['ingress'][0].get('from', [])
-            # TODO(me): The whole from logic
-            src_pod_ips = []
+            from_data = policy_data['ingress'][0].get('from')
+            if not from_data:
+                src_pod_ips = ['*']
+        if from_changed and from_data:
+            # TODO(me): Use caches rather than doing list operations
+            def do_selector(key):
+                final_selector = {}
+                selectors = [item[key] for item in from_data if key in item]
+                # Merge all selectors together
+                for selector in selectors:
+                    for (label, value) in selector.items():
+                        final_selector.setdefault(label, set()).add(value)
+                return final_selector
+
+            # Verify selectors are valid
+            for item in from_data:
+                if 'namespace' in item and 'pods' in item:
+                    LOG.warn("Policy %s has both namespace and pod selectors "
+                             "in the from clause. ACLs for the policy will "
+                             "not be implemented", policy)
+                    return
+
+            ns_selector = do_selector('namespaces')
+            pod_selector = do_selector('pods')
+            if ns_selector:
+                # Query namespaces by label selector
+                ns_data = k8s.get_namespaces(cfg.CONF.k8s_api_server_host,
+                                             cfg.CONF.k8s_api_server_port,
+                                             ns_selector)
+                # Query all pods  in each namesoace
+                pod_data = []
+                for namespace in ns_data:
+                    pod_data.extend(k8s.get_pods(
+                        cfg.CONF.k8s_api_server_host,
+                        cfg.CONF.k8s_api_server_port,
+                        namespace=namespace['metadata']['name']))
+            else:
+                # Query pod in policy namespace by selector
+                pod_data = k8s.get_pods(
+                    cfg.CONF.k8s_api_server_host,
+                    cfg.CONF.k8s_api_server_port,
+                    namespace=policy_data['metadata']['namespace'],
+                    pod_selector=pod_selector)
+
+            src_pod_ips = [pod['status']['podIP'] for pod in pod_data
+                           if 'podIP' in pod['status']]
+
         pseudo_acl = (constants.STANDARD_ACL_PRIORITY,
                       ports_changed and protocol_ports or pseudo_acl[1],
                       from_changed and src_pod_ips or pseudo_acl[2],
@@ -345,31 +389,64 @@ class PolicyProcessor(object):
                 pseudo_acl = self._pseudo_acls[policy_name]
             except KeyError:
                 LOG.debug("Pseudo ACLs for policy:%s not yet generated",
-                            policy_name)
+                          policy_name)
                 pseudo_acl = self._rebuild_pseudo_acl(
                     policy_name, True, True)
+            # In some cases a pseudo acl could be empty.
+            if not pseudo_acl:
+                continue
             # NOTE: We do not validate that the protocol names are valid
             ports_clause = pseudo_acl[1]
+            from_clause = pseudo_acl[2]
+            # If the from clause is an empty list then no IP matches
+            if not from_clause:
+                LOG.debug("The ACL for policy %s matches no IP address and "
+                          "will not be programmed", policy_name)
+                continue
+            src_ip_list = "\,".join(from_clause)
+            src_match = None
+            if src_ip_list != '*':
+                # '*' means every address matches and therefore no source IP
+                # match should be added to the ACL
+                src_match = r"ip4.src\=\=\{%s\}" % src_ip_list
+            match_items = set()
             protocol_port_map = {}
             for (protocol, port) in ports_clause:
-                protocol_port_map.setdefault(protocol, set()).add(port)
-            ports_match = "\ &&\ ".join([r"%s.dst\=\=\{%s\}" % (
-                                         protocol.lower(), ",".join(ports))
-                                         for (protocol, ports) in
-                                         protocol_port_map.items()])
+                ports = protocol_port_map.setdefault(protocol, set())
+                if port:
+                    ports.add(port)
+            for protocol, ports in protocol_port_map.items():
+                if ports:
+                    item_match_str = (r"%s.dst\=\=\{%s\}" %
+                                      (protocol.lower(), ",".join(
+                                          [str(port) for port in ports
+                                           if port is not None])))
+                else:
+                    item_match_str = protocol.lower()
+                match_items.add(item_match_str)
+            ports_match = "\ ||\ ".join(match_items)
             lport_data = _fetch_lport(pod)
             lport_uuid = lport_data['_uuid'].strip('"')
             lport_name = lport_data['name'].strip('"')
+            if ports_match and src_match:
+                policy_match = "%s\ &&\ %s" % (ports_match, src_match)
+            elif ports_match:
+                policy_match = ports_match
+            elif src_match:
+                policy_match = src_match
             outport_match = r'outport\=\=\"%s\"\ &&\ ip' % lport_name
-            if ports_match:
-                match = r'%s\ &&\ %s' % (outport_match, ports_match)
+            if policy_match:
+                match = r'%s\ &&\ %s' % (outport_match, policy_match)
             else:
                 match = outport_match
-                LOG.debug("Policy: %s - ACL match: %s", policy_name, match)
+            LOG.debug("Policy: %s - ACL match: %s", policy_name, match)
             ovn_acl_data = (pseudo_acl[0], match, pseudo_acl[3])
             # TODO(me): lswitch & lport can be easily cached: pods don't move
             ls_name = _find_lswitch(lport_uuid)
-            ovn.create_ovn_acl(ls_name, pod, lport_name, *ovn_acl_data)
+            # Also store policy name in external ids. It could be useful for
+            # debugging
+            ovn.create_ovn_acl(ls_name, pod, lport_name, *ovn_acl_data,
+                               k8s_policy=policy_name)
 
     def _process_pod_acls(self, pod, namespace, network_policies):
         pod_data = _fetch_pod(pod, namespace)
@@ -377,7 +454,7 @@ class PolicyProcessor(object):
         current_acls = _get_acls(pod)
         if not ns_data.get('isolated', False):
             LOG.debug("Pod %s deployed in non-isolated namespace: %s."
-                    "Whitelisting traffic", pod, namespace)
+                      "Whitelisting traffic", pod, namespace)
             _whitelist_pod_traffic(pod)
         else:
             LOG.debug("Applying ACLs to Pod: %s", pod_data['metadata']['name'])

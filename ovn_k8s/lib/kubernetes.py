@@ -68,7 +68,8 @@ def get_pods(host, port, namespace=None, pod_selector=None):
     label_selectors = []
     if pod_selector:
         for name, value in pod_selector.items():
-            label_selectors.append('%s=%' % (name, value))
+            label_selectors.append('%s in (%s)' % (
+                name, ",".join([item for item in value])))
     resources = _list_resource(host, port, 'pods',
                                namespace=namespace,
                                label_selectors=label_selectors)
@@ -107,6 +108,19 @@ def get_network_policy(host, port, namespace, network_policy):
         # TODO(me): raise here
         return
     return response.json()
+
+
+def get_namespaces(host, port, ns_selector=None):
+    label_selectors = []
+    if ns_selector:
+        for name, value in ns_selector.items():
+            label_selectors.append('%s in (%s)' % (
+                name, ",".join([item for item in value])))
+    resources = _list_resource(host, port, 'namespaces',
+                               label_selectors=label_selectors)
+    if not resources:
+        return []
+    return resources.json()['items']
 
 
 def get_namespace(host, port, name):
