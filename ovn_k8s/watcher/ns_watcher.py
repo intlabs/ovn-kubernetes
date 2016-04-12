@@ -1,10 +1,8 @@
 import json
 
-from oslo_config import cfg
 from oslo_log import log
 
 from ovn_k8s import constants
-from ovn_k8s.lib import kubernetes as k8s
 from ovn_k8s import policy_processor as pp
 from ovn_k8s import utils
 from ovn_k8s.watcher import registry
@@ -36,12 +34,7 @@ class NamespaceWatcher(object):
         if not self.np_watcher:
             return
         if event == 'ADDED':
-            self.np_watcher.add_namespace(
-                namespace,
-                k8s.watch_network_policies(
-                    cfg.CONF.k8s_api_server_host,
-                    cfg.CONF.k8s_api_server_port,
-                    namespace))
+            self.np_watcher.add_namespace(namespace)
         elif event == 'DELETED':
             self.np_watcher.remove_namespace(namespace)
 

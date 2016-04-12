@@ -1,10 +1,12 @@
 import json
 
 from eventlet import greenthread
+from oslo_config import cfg
 from oslo_log import log
 from six.moves import queue
 
 from ovn_k8s import constants
+from ovn_k8s.lib import kubernetes as k8s
 from ovn_k8s import policy_processor as pp
 
 LOG = log.getLogger(__name__)
@@ -44,17 +46,34 @@ class NetworkPolicyWatcher(object):
         for namespace in self._np_watcher_threads:
             self.remove_namespace(namespace)
 
-    def add_namespace(self, namespace, np_stream):
+    def _generate_watcher(self, namespace):
+        np_stream = k8s.watch_network_policies(
+            cfg.CONF.k8s_api_server_host,
+            cfg.CONF.k8s_api_server_port,
+            namespace)
+        return NetworkPolicyNSWatcher(self.notifications,
+                                      namespace,
+                                      np_stream)
+
+    def add_namespace(self, namespace):
         """Add a namespace from which watch network policies."""
-        np_watcher = NetworkPolicyNSWatcher(self.notifications,
-                                            namespace,
-                                            np_stream)
+        if namespace in self._np_watcher_threads:
+            # Already monitoring, do nothing
+            LOG.debug("Network policies for namespace: %s already being "
+                      "monitored", namespace)
+            return
         LOG.debug("Starting network policy watcher for namespace: %s",
                   namespace)
 
         def _process_loop():
+            np_watcher = self._generate_watcher(namespace)
             while True:
-                np_watcher.process()
+                try:
+                    np_watcher.process()
+                except StopIteration:
+                    LOG.debug("The watch stream was closed. Re-opening policy "
+                              "watch stream for namespace: %s", namespace)
+                    np_watcher = self._generate_watcher(namespace)
 
         np_watcher_thread = greenthread.spawn(_process_loop)
         self._np_watcher_threads[namespace] = np_watcher_thread

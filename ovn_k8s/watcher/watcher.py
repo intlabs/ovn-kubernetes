@@ -16,9 +16,15 @@ LOG = log.getLogger(__name__)
 WATCHER_REGISTRY = registry.WatcherRegistry.get_instance()
 
 
-def _process_func(watcher):
+def _process_func(watcher, watcher_recycle_func):
     while True:
-        watcher.process()
+        try:
+            watcher.process()
+        except StopIteration:
+            # Recycle watcher
+            LOG.info("Regenerating watcher and reconnecting to stream using "
+                     "function %s" % watcher_recycle_func.__name__)
+            watcher = watcher_recycle_func()
 
 
 def _create_ovndb_watcher():
@@ -28,6 +34,10 @@ def _create_ovndb_watcher():
     watcher = ovndb_watcher.OvndbWatcher(proc.stdout)
     WATCHER_REGISTRY.ovndb_watcher = watcher
     return watcher
+
+# TODO(me): Kubernetes watches might use resource version to avoid receiving
+# again all events concernings existing resources when the watchers are
+# regenerated
 
 
 def _create_k8s_ns_watcher():
@@ -61,12 +71,12 @@ def start_threads():
     LOG.debug("Starting Policy processor")
     pool.spawn(pp.run_policy_processor)
     LOG.info("Starting OVN Northbound DB watcher")
-    pool.spawn(_process_func, ovn_db_watcher_inst)
+    pool.spawn(_process_func, ovn_db_watcher_inst, _create_ovndb_watcher)
     LOG.info("Starting Kubernetes Namespace watcher")
-    pool.spawn(_process_func, ns_watcher_inst)
+    pool.spawn(_process_func, ns_watcher_inst, _create_k8s_ns_watcher)
     LOG.info("Starting Kubernetes Pod watcher")
-    pool.spawn(_process_func, pod_watcher_inst)
+    pool.spawn(_process_func, pod_watcher_inst, _create_k8s_pod_watcher)
     LOG.info("Starting Kubernetes Network Policy watcher")
-    pool.spawn(_process_func, np_watcher_inst)
+    pool.spawn(_process_func, np_watcher_inst, _create_k8s_np_watcher)
     pool.waitall()
     np_watcher_inst.close()
