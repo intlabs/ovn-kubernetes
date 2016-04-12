@@ -111,17 +111,21 @@ class NetworkPolicyWatcher(object):
         from_changed = False
         ports_changed = False
         if cached_np:
+            # TODO(me): the current code only manages a single ingress rule
+            # for each policy.
+            old_ingress = cached_np['ingress']
+            current_ingress = np_data['ingress']
             # Check for changes in pod selector
             old_pod_selector = cached_np.get('podSelector')
             pod_selector = np_data.get('podSelector')
             pod_selector_changed = (old_pod_selector != pod_selector)
             # Check for changes in from clause
-            old_from = cached_np.get('From')
-            current_from = np_data.get('From')
+            old_from = old_ingress[0].get('from')
+            current_from = current_ingress[0].get('from')
             from_changed = (old_from != current_from)
             # Check for changes in ports clause
-            old_ports = cached_np.get('Ports')
-            current_ports = np_data.get('Ports')
+            old_ports = old_ingress[0].get('ports')
+            current_ports = current_ingress[0].get('ports')
             ports_changed = (old_ports != current_ports)
         if (not cached_np or pod_selector_changed or
             from_changed or ports_changed):
