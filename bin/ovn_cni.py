@@ -5,7 +5,6 @@ import netaddr
 import os
 import random
 import re
-import requests
 import shlex
 import sys
 
@@ -14,6 +13,7 @@ from oslo_log import log
 
 from ovn_k8s import constants
 from ovn_k8s.lib import ovn
+from ovn_k8s.lib import kubernetes as k8s
 from ovn_k8s import utils
 
 LOG = log.getLogger(__name__)
@@ -43,53 +43,6 @@ def _parse_stdin():
         return json.loads(input_data)
     except ValueError:
         raise OVNCNIException(101, 'invalid JSON input')
-
-
-def _generate_mac(prefix="00:00:00"):
-    random.seed()
-    # This is obviously not collition free, but come on! Seriously,
-    # please fix this, eventually
-    mac = "%s:%02X:%02X:%02X" % (
-        prefix,
-        random.randint(0, 255),
-        random.randint(0, 255),
-        random.randint(0, 255))
-    return mac
-
-
-def _get_host_lswitch_name():
-    # Use kubelet introspection API to grab machine ID.
-    # TODO: Some error checking might be worth
-    response = requests.get("http://localhost:%d/spec" %
-                            constants.KUBELET_PORT)
-    data = response.json()
-    # Use that machine ID as OVN lswitch name
-    return data['machine_id']
-
-
-def _check_vswitch(lswitch_name):
-    LOG.info("OVN lswitch for the host: %s", lswitch_name)
-    lswitch_raw_data = ovn.ovn_nbctl('find', 'Logical_Switch',
-                                     'name=%s' % lswitch_name)
-    lswitch_data = ovn.parse_ovn_nbctl_output(lswitch_raw_data)
-    if len(lswitch_data) > 1:
-        LOG.warn("I really was not expecting more than one switch... I'll "
-                 "pick the first, there's a %.2f\% chance I'll get it right" %
-                 (100 / len(lswitch_data)))
-    if lswitch_data:
-        lswitch_data = lswitch_data[0]
-        LOG.debug("OVN Logical Switch for K8S host found. Skipping creation")
-        return lswitch_data
-
-
-def _check_host_vswitch(args, network_config):
-    # Check for host logical switch
-    lswitch_name = _get_host_lswitch_name()
-    if not _check_vswitch(lswitch_name):
-        message = "Node OVN logical switch not configured"
-        LOG.error(message)
-        raise OVNCNIException(199, message)
-    return lswitch_name
 
 
 def _setup_interface(pid, container_id, dev, mac,
@@ -181,49 +134,7 @@ def _generate_container_ip(cidr):
         raise OVNCNIException(104, "Failure while generating pod IP address")
 
 
-def _create_ovn_logical_port(lswitch_name, container_id, mac,
-                             ip_address, pod_name, ns_name=None):
-    # TODO: This should use the OVSDB transact capability.
-    try:
-        # Create logical port
-        LOG.debug("Creating logical port on switch %s for container %s",
-                  lswitch_name, container_id)
-        ovn.ovn_nbctl('lport-add', lswitch_name, container_id)
-        # Set the ip address and mac address
-        LOG.debug("Setting up MAC (%s) and IP (%s) addresses for logical port",
-                  mac, ip_address)
-        cmd_items = tuple(shlex.split('lport-set-addresses %s "%s %s"' %
-                                      (container_id, mac, ip_address)))
-        ovn.ovn_nbctl(*cmd_items)
-        # Block all ingress traffic
-        # TODO: also block egress if Kubernetes network policy allow to
-        # discipline it
-        LOG.debug("Adding drop-all ACL for port %s", container_id)
-        # Note: The reason rather complicated expression is to be able to set
-        # an external id for the ACL as well (acl-add won't return the ACL id)
-        ovn.create_ovn_acl(lswitch_name, pod_name, container_id,
-                           constants.DEFAULT_ACL_PRIORITY,
-                           r'outport\=\=\"%s\"\ &&\ ip' % container_id,
-                           'drop')
-        # Store the port name and the kubernetes pod name in the ACL's external
-        # IDs. This will make retrieval easier
-        # Store pod name and, if provided, the namespace name in port's
-        # external ids in order to keep track of the association between
-        # pod and logical port
-        if ns_name:
-            ovn.ovn_nbctl('set', 'Logical_port', container_id,
-                          'external_ids:pod_name=%s' % pod_name,
-                          'external_ids:ns_name=%s' % ns_name)
-        else:
-            ovn.ovn_nbctl('set', 'Logical_port', container_id,
-                          'external_ids:pod_name=%s' % pod_name)
-    except Exception:
-        LOG.exception("Unable to configure OVN logical port for pod on "
-                      "lswitch %s", lswitch_name)
-        raise OVNCNIException(105, "Failure while setting up OVN logical port")
-
-
-def _cni_add(network_config, lswitch_name):
+def _cni_add(network_config):
     try:
         netns_dst = os.environ[constants.CNI_NETNS]
         container_id = os.environ[constants.CNI_CONTAINER_ID]
@@ -240,20 +151,29 @@ def _cni_add(network_config, lswitch_name):
                 103, "Unable to extract container pid from namespace")
         pid = pid_match.groups()[0]
         cidr = netaddr.IPNetwork(network_config['ipam']['subnet'])
-        mac = _generate_mac()
+        mac = utils.generate_mac()
     except KeyError:
         raise OVNCNIException(102, 'Required CNI variables missing')
 
     # Generate container IP
     ip_address, gateway_ip = _generate_container_ip(cidr)
 
+    api_server_host, api_server_port = k8s.get_k8s_api_server()
+    # TODO(me): This should be a single class
+    # Annotate pod with MAC address
+    # Annotate pod with Infra container ID
+    k8s.set_pod_annotation(
+        api_server_host, api_server_port, ns_name, pod_name,
+        'podMAC', mac)
+    LOG.debug("MAC:%s annotated on pod %s", mac, pod_name)
+    k8s.set_pod_annotation(
+        api_server_host, api_server_port, ns_name, pod_name,
+        'infraContainerId', container_id)
+    LOG.debug("Infra Container Id:%s annotated on pod %s",
+              container_id, pod_name)
     LOG.debug("Container network namespace:%s", netns_dst)
     LOG.debug("Container ID: %s", container_id)
     LOG.debug("Chosen pod IP: %s", ip_address)
-
-    # Create OVN logical port
-    _create_ovn_logical_port(lswitch_name, container_id, mac,
-                             ip_address, pod_name, ns_name)
 
     # Configure the veth pair for the pod
     veth_inside, veth_outside = _setup_interface(
@@ -269,7 +189,6 @@ def _cni_add(network_config, lswitch_name):
                       'external_ids:ip_address=%s' % ip_address)
     except Exception:
         LOG.exception("Unable to plug interface into OVN bridge")
-        ovn.ovn_nbctl("lport-del", container_id)
         raise OVNCNIException(106, "Failure in plugging pod interface")
 
     return {
@@ -287,84 +206,13 @@ def _cni_output(result):
     print(json.dumps(output))
 
 
-def init_host(args, network_config=None):
-    # Store/Update the NorthBound DB location in OpenVswitch external ids to
-    # avoid relying on hardcoded configuration files locations when the plugin
-    # is invoked by kubernetes
+def init_host(args):
     ovn.ovs_vsctl("set", "Open_vSwitch", ".",
-                  "external_ids:ovnnb-remote=%s" % args.ovn_remote)
-    # Check for logical router, if not found create one
-    lrouter_name = args.lrouter_name
-    lrouter_raw_data = ovn.ovn_nbctl('find', 'Logical_Router',
-                                     'name=%s' % lrouter_name)
-    lrouter_data = ovn.parse_ovn_nbctl_output(lrouter_raw_data)
-    if len(lrouter_data) > 1:
-        LOG.warn("I really was not expecting more than one router... I'll "
-                 "pick the first, there's a %.2f\% chance I'll get it right",
-                 (100 / len(lrouter_data)))
-    if lrouter_data:
-        lrouter_data = lrouter_data[0]
-        LOG.debug("Logical router for K8S networking found. "
-                  "Skipping creation")
-    else:
-        LOG.debug("Creating Logical Router for K8S networking with name:%s",
-                  lrouter_name)
-        output = ovn.ovn_nbctl('create', 'Logical_Router',
-                               'name=%s' % lrouter_name)
-        LOG.debug("Will use OVN Logical Router:%s", output)
-
-    # Check for host logical switch. If not found create one
-    lswitch_name = _get_host_lswitch_name()
-    LOG.info("OVN lswitch for the host: %s", lswitch_name)
-    lswitch_data = _check_vswitch(lswitch_name)
-    if lswitch_data:
-        LOG.debug("OVN Logical Switch for K8S host found. Skipping creation")
-    else:
-        LOG.debug("Creating LogicalSwitch for K8S host with name: %s",
-                  lswitch_name)
-        ovn.ovn_nbctl('lswitch-add', lswitch_name)
-
-    if network_config:
-        # Grab subnet from nework config
-        subnet = network_config['ipam']['subnet']
-    elif args.subnet:
-        # Maybe we have passed it as an argument?
-        subnet = args.subnet
-    else:
-        LOG.debug("As no subnet was specified host configuration will "
-                  "not be completed")
-        return
-    # Check for logical router port connecting local logical switch to
-    # kubernetes router.
-    # If not found create one, and connect it to both router and switch
-    lrp_raw_data = ovn.ovn_nbctl('find', 'Logical_Router_port',
-                                 'name=%s' % lswitch_name)
-    lrp_data = ovn.parse_ovn_nbctl_output(lrp_raw_data)
-    if len(lrp_data) > 1:
-        LOG.warn("I really was not expecting more than one router port... "
-                 "I'll pick the first, there's a %.2f\% chance I'll get it "
-                 "right", (100 / len(lrp_data)))
-    if lrp_data:
-        lrp_data = lrp_data[0]
-        LOG.debug("OVN logical router port for K8S host found."
-                  "Skipping creation")
-        # TODO: worry about changes in IP address and subnet
-    else:
-        lrp_mac = _generate_mac()
-        cidr = netaddr.IPNetwork(subnet)
-        ip_address = netaddr.IPAddress(cidr.first + 1)
-        lrp_uuid = ovn.ovn_nbctl('--', '--id=@lrp', 'create',
-                                 'Logical_Router_port',
-                                 'name=%s' % lswitch_name,
-                                 'network=%s' % ip_address,
-                                 'mac="%s"' % lrp_mac, '--', 'add',
-                                 'Logical_Router', lrouter_name, 'ports',
-                                 '@lrp', '--', 'lport-add',
-                                 lswitch_name, 'rp-%s' % lswitch_name)
-        ovn.ovn_nbctl('set', 'Logical_port', 'rp-%s' % lswitch_name,
-                      'type=router', 'options:router-port=%s' % lswitch_name,
-                      'addresses="%s"' % lrp_mac)
-        LOG.debug("Configured logical router port: %s", lrp_uuid)
+                  "external_ids:k8s-api-server-host=%s" %
+                  args.k8s_api_server_host)
+    ovn.ovs_vsctl("set", "Open_vSwitch", ".",
+                  "external_ids:k8s-api-server-port=%s" %
+                  args.k8s_api_server_port)
 
 
 def _cni_del(container_id, network_config):
@@ -372,13 +220,6 @@ def _cni_del(container_id, network_config):
     # Oh wait, we do not store them anyway, so why bother at all?
     # Remove OVN ACLs...
     # TODO: We might first want to have the code that adds them
-    # Remove OVN Logical port
-    try:
-        ovn.ovn_nbctl("lport-del", container_id)
-    except Exception:
-        message = "Unable to remove OVN logical port"
-        LOG.exception(message)
-        raise OVNCNIException(110, message)
     try:
         ovn.ovs_vsctl("del-port", container_id[:15])
     except Exception:
@@ -406,11 +247,9 @@ def cni_add(args):
         container_id = os.environ.get(constants.CNI_CONTAINER_ID)
         LOG.info("Configuring networking for container:%s", container_id)
         LOG.debug("Network config from input: %s", network_config)
-        LOG.debug("Verifying host setup")
-        lswitch_name = _check_host_vswitch(args, network_config)
         LOG.debug("Configuring pod networking on container %s",
                   container_id)
-        result = _cni_add(network_config, lswitch_name)
+        result = _cni_add(network_config)
         LOG.info("Pod networking configured on container %s."
                  "OVN logical port: %s; IP address: %s",
                  container_id, "TODO", result['ip_address'])
@@ -426,8 +265,6 @@ def cni_del(args):
         network_config = _parse_stdin()
         container_id = os.environ.get(constants.CNI_CONTAINER_ID)
         LOG.info("Deconfiguring networking for container:%s", container_id)
-        LOG.debug("Verifying host setup")
-        _check_host_vswitch(args, network_config)
         LOG.debug("Network config from input: %s", network_config)
         _cni_del(container_id, network_config)
         LOG.info("Pod networking de-configured on container %s", container_id)
@@ -443,10 +280,9 @@ def parse_args():
 
     # Parser for init command (not a CNI command)
     parser_host_init = subparsers.add_parser('init')
-    parser_host_init.add_argument('--lrouter-name',
-                                  default=constants.DEFAULT_LROUTER_NAME)
-    parser_host_init.add_argument('--subnet', default=None)
-    parser_host_init.add_argument('--ovn-remote', default=None)
+    parser_host_init.add_argument('--subnet')
+    parser_host_init.add_argument('--k8s_api_server_host')
+    parser_host_init.add_argument('--k8s_api_server_port')
     parser_host_init.set_defaults(func=init_host)
     # Parser for CNI ADD command
     parser_cni_add = subparsers.add_parser("ADD")

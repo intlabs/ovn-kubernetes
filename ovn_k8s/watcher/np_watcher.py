@@ -5,6 +5,7 @@ from oslo_config import cfg
 from oslo_log import log
 from six.moves import queue
 
+import ovn_k8s
 from ovn_k8s import constants
 from ovn_k8s.lib import kubernetes as k8s
 from ovn_k8s import policy_processor as pp
@@ -91,9 +92,9 @@ class NetworkPolicyWatcher(object):
     def _send_event(self, np_name, event_type, **kwargs):
         event_metadata = self.np_cache[np_name]
         event_metadata.update(kwargs)
-        event = pp.Event(EVENT_MAP[event_type],
-                         source=np_name,
-                         metadata=event_metadata)
+        event = ovn_k8s.Event(EVENT_MAP[event_type],
+                              source=np_name,
+                              metadata=event_metadata)
         pp.get_event_queue().put((constants.NP_EVENT_PRIORITY,
                                   event))
 

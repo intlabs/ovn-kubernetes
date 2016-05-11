@@ -1,14 +1,12 @@
-import subprocess
-
 from eventlet import greenpool
 from oslo_config import cfg
 from oslo_log import log
 
 from ovn_k8s.lib import kubernetes as k8s
+from ovn_k8s import conn_processor as cp
 from ovn_k8s import policy_processor as pp
 from ovn_k8s.watcher import np_watcher
 from ovn_k8s.watcher import ns_watcher
-from ovn_k8s.watcher import ovndb_watcher
 from ovn_k8s.watcher import pod_watcher
 from ovn_k8s.watcher import registry
 
@@ -26,14 +24,6 @@ def _process_func(watcher, watcher_recycle_func):
                      "function %s" % watcher_recycle_func.__name__)
             watcher = watcher_recycle_func()
 
-
-def _create_ovndb_watcher():
-    proc = subprocess.Popen(['sudo', 'ovsdb-client', 'monitor',
-                             cfg.CONF.ovn_nb_remote, 'Logical_Port'],
-                            stdout=subprocess.PIPE)
-    watcher = ovndb_watcher.OvndbWatcher(proc.stdout)
-    WATCHER_REGISTRY.ovndb_watcher = watcher
-    return watcher
 
 # TODO(me): Kubernetes watches might use resource version to avoid receiving
 # again all events concernings existing resources when the watchers are
@@ -66,12 +56,11 @@ def start_threads():
     np_watcher_inst = _create_k8s_np_watcher()
     ns_watcher_inst = _create_k8s_ns_watcher()
     pod_watcher_inst = _create_k8s_pod_watcher()
-    ovn_db_watcher_inst = _create_ovndb_watcher()
     pool = greenpool.GreenPool()
+    LOG.debug("Starting Pod Event processor")
+    pool.spawn(cp.run_processor)
     LOG.debug("Starting Policy processor")
-    pool.spawn(pp.run_policy_processor)
-    LOG.info("Starting OVN Northbound DB watcher")
-    pool.spawn(_process_func, ovn_db_watcher_inst, _create_ovndb_watcher)
+    pool.spawn(pp.run_processor)
     LOG.info("Starting Kubernetes Namespace watcher")
     pool.spawn(_process_func, ns_watcher_inst, _create_k8s_ns_watcher)
     LOG.info("Starting Kubernetes Pod watcher")

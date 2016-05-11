@@ -1,9 +1,5 @@
+import random
 import subprocess
-
-from oslo_config import cfg
-
-from ovn_k8s import constants
-from ovn_k8s.lib import kubernetes as k8s
 
 
 def call_popen(cmd):
@@ -19,13 +15,13 @@ def call_popen(cmd):
     return output
 
 
-def is_namespace_isolated(namespace):
-    annotations = k8s.get_ns_annotations(cfg.CONF.k8s_api_server_host,
-                                         cfg.CONF.k8s_api_server_port,
-                                         namespace)
-    isolation = annotations and annotations.get(constants.K8S_ISOLATION_ANN)
-    # Interpret anythingthat is not "on" as "off"
-    if isolation == 'on':
-        return True
-    else:
-        return False
+def generate_mac(prefix="00:00:00"):
+    random.seed()
+    # This is obviously not collition free, but come on! Seriously,
+    # please fix this, eventually
+    mac = "%s:%02X:%02X:%02X" % (
+        prefix,
+        random.randint(0, 255),
+        random.randint(0, 255),
+        random.randint(0, 255))
+    return mac

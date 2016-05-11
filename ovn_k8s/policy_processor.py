@@ -1,25 +1,14 @@
-import time
-
 from oslo_config import cfg
 from oslo_log import log
-from six.moves import queue
 
+import ovn_k8s
 from ovn_k8s import constants
 from ovn_k8s.lib import kubernetes as k8s
 from ovn_k8s.lib import ovn
-from ovn_k8s import utils
 from ovn_k8s.watcher import registry
 
 LOG = log.getLogger(__name__)
 WATCHER_REGISTRY = registry.WatcherRegistry.get_instance()
-
-
-class Event(object):
-
-    def __init__(self, event_type, source, metadata):
-        self.event_type = event_type
-        self.source = source
-        self.metadata = metadata
 
 
 def _find_lswitch(lport_uuid):
@@ -131,7 +120,7 @@ def _fetch_namespace(namespace):
         ns_data = k8s.get_namespace(cfg.CONF.k8s_api_server_host,
                                     cfg.CONF.k8s_api_server_port,
                                     namespace)
-        ns_data['isolated'] = utils.is_namespace_isolated(namespace)
+        ns_data['isolated'] = k8s.is_namespace_isolated(namespace)
     return ns_data
 
 
@@ -210,48 +199,24 @@ def _process_namespace_isolation_off(events):
     return events
 
 
-def _process_pod_deletion(events):
-    """Remove ACLs for deleted pods.
-
-    This routine handles lport events for pod deletion, rather
-    than Pod DELETED events - in order to ensure no network connection
-    exists anymore when the ACLs are deleted.
-
-    :param events: events to process
-    """
-    selected_pods = []
-    for event in events[:]:
-        if event.event_type == constants.LPORT_DEL:
-            selected_pods.append(event.metadata['pod_name'])
-            events.remove(event)
-    for pod in selected_pods:
-        _remove_all_acls(pod)
-    return events
-
-
-class PolicyProcessor(object):
-
-    _instance = None
+class PolicyProcessor(ovn_k8s.BaseProcessor):
 
     def __init__(self):
+        super(PolicyProcessor, self).__init__()
         # Map policy with a list of pseudo-acls. Each of these pseduo-acls is
         # just a tuple with priority, port/protocol match, source ip match,
         # and action
         self._pseudo_acls = {}
         self._dirty_policies = {}
-        self.event_queue = queue.PriorityQueue()
-
-    @classmethod
-    def get_instance(cls):
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
 
     def _process_pod_event(self, event, pod_ns_map, affected_pods):
         pod_name = event.metadata['metadata']['name']
         pod_ns_map[pod_name] = event.metadata['metadata']['namespace']
         if event.event_type != constants.POD_DEL:
             affected_pods.setdefault(pod_name, []).append(event)
+        else:
+            # Remove all acls for pod
+            _remove_all_acls(pod_name)
         # Find policies whoe PodSelector matches this pod
         affected_policies = _find_policies_for_pod(
             pod_name, pod_ns_map[pod_name])
@@ -267,9 +232,9 @@ class PolicyProcessor(object):
             policy.update({'from_changed': True})
             get_event_queue().put(
                 (constants.NP_EVENT_PRIORITY,
-                 Event(constants.NP_UPDATE,
-                       policy['metadata']['name'],
-                       policy)))
+                 event.Event(constants.NP_UPDATE,
+                             policy['metadata']['name'],
+                             policy)))
 
     def _process_ns_event(self, event, pod_ns_map, affected_pods):
         namespace = event.source
@@ -478,9 +443,6 @@ class PolicyProcessor(object):
         events = _process_namespace_isolation_off(events)
         if not events:
             return
-        events = _process_pod_deletion(events)
-        if not events:
-            return
 
         # Pods affected by events
         # 1) Pod event -> affects network policies -> affects all pods
@@ -552,35 +514,11 @@ class PolicyProcessor(object):
         else:
             LOG.info("Event processing terminated.")
 
-    def run(self):
-        empty_loop_counter = 1
-        events = []
-        while True:
-            # get will retrieve a tuple whose first element is the
-            # priority that we can discard
-            try:
-                # Not sure how wait with timeout plays with eventlet
-                event = self.event_queue.get_nowait()[1]
-                events.append(event)
-                LOG.debug("Received event %s from %s",
-                          event.event_type,
-                          event.source)
-                empty_loop_counter = 1
-            except queue.Empty:
-                # no element in the queue
-                if events:
-                    empty_loop_counter = empty_loop_counter - 1
-                    if empty_loop_counter < 0:
-                        # process events
-                        self.process_events(events)
-                        events = []
-                time.sleep(cfg.CONF.coalesce_interval)
-
 
 def get_event_queue():
     """Returns the event queue from the Policy Processor instance."""
     return PolicyProcessor.get_instance().event_queue
 
 
-def run_policy_processor():
+def run_processor():
     PolicyProcessor.get_instance().run()

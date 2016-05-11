@@ -2,8 +2,10 @@ import json
 
 from oslo_log import log
 
+import ovn_k8s
 from ovn_k8s import constants
 from ovn_k8s import policy_processor as pp
+from ovn_k8s import conn_processor as cp
 
 LOG = log.getLogger(__name__)
 EVENT_MAP = {
@@ -19,38 +21,85 @@ class PodWatcher(object):
         self._pod_stream = pod_stream
         self.pod_cache = {}
 
-    def _send_event(self, pod_name, event_type):
-        event = pp.Event(EVENT_MAP[event_type],
-                         source=pod_name,
-                         metadata=self.pod_cache[pod_name])
-        pp.get_event_queue().put((constants.POD_EVENT_PRIORITY,
-                                  event))
+    def _send_policy_event(self, pod_name, event_type):
+        ev = ovn_k8s.Event(EVENT_MAP[event_type],
+                           source=pod_name,
+                           metadata=self.pod_cache[pod_name])
+        pp.get_event_queue().put((constants.POD_EVENT_PRIORITY, ev))
 
-    def _process_pod_event(self, event):
+    def _send_connectivity_event(self, pod_name, event_type):
+        ev = ovn_k8s.Event(EVENT_MAP[event_type],
+                           source=pod_name,
+                           metadata=self.pod_cache[pod_name])
+        cp.get_event_queue().put((constants.POD_EVENT_PRIORITY, ev))
+
+    def _process_pod_policies(self, pod_name, event_type, event, cached_pod):
+        LOG.debug("Checking policy event %s for pod %s",
+                  event_type, pod_name)
         pod_ip = event['object']['status'].get('podIP')
         pod_metadata = event['object']['metadata']
-        cached_pod = self.pod_cache.get(pod_metadata['name'])
         if cached_pod and not pod_ip:
             pod_ip = cached_pod['status'].get('podIP')
         if not pod_ip:
             LOG.debug("No IP address yet assigned to pod %s - skipping",
-                      pod_metadata['name'])
+                      pod_name)
             return
-        event_type = event['type']
-        if cached_pod and event_type != 'DELETED':
+        if cached_pod:
             # Check whether the event is worth being considered
-            if (pod_ip == cached_pod['status']['podIP'] and
-                pod_metadata['labels'] == cached_pod['metadata']['labels']):
-                LOG.debug("No relevant change for pod %s - skipping",
-                          pod_metadata['name'])
-                return
-        # If we hit this line the cache needs to be updated
-        self.pod_cache[pod_metadata['name']] = event['object']
-        LOG.debug("Sending event %s for pod %s",
-                  event_type, pod_metadata['name'])
-        self._send_event(pod_metadata['name'], event_type)
+            if (pod_metadata['labels'] != cached_pod['metadata']['labels']):
+                LOG.debug("Detected label change for pod %s", pod_name)
+                return True
+
+    def _process_pod_connectivity(self, pod_name, event_type,
+                                  event, cached_pod):
+        LOG.debug("Checking connectivity event %s for pod %s",
+                  event_type, pod_name)
+        # Always process upon deletion as logical port and acls must be
+        # destroyed
         if event_type == 'DELETED':
-            del self.pod_cache[pod_metadata['name']]
+            return True
+        # Process when node Name, pod IP, pod MAC, and Infra container ID are
+        # available, but avoid sending duplicate events
+        pod_ip = event['object']['status'].get('podIP')
+        pod_mac = event['object']['metadata']['annotations'].get('podMAC')
+        pod_infra_id = event['object']['metadata']['annotations'].get(
+            'infraContainerId')
+        node_name = event['object']['spec'].get('nodeName')
+        if pod_ip and pod_mac and pod_infra_id and node_name:
+            if not cached_pod:
+                return True
+            if (pod_ip != cached_pod['status'].get('podIP') or
+                pod_mac != cached_pod['metadata']['annotations'].get(
+                    'podMAC') or
+                pod_infra_id != cached_pod['metadata']['annotations'].get(
+                    'infraContainerId') or
+                node_name != cached_pod['spec'].get('nodeName')):
+                return True
+        LOG.debug("Will not send a connectivity event for pod: %s", pod_name)
+
+    def _process_pod_event(self, event):
+        pod_name = event['object']['metadata']['name']
+        event_type = event['type']
+        cached_pod = self.pod_cache.get(pod_name)
+        conn_event = self._process_pod_connectivity(pod_name, event_type,
+                                                    event, cached_pod)
+        policy_event = self._process_pod_policies(pod_name, event_type,
+                                                  event, cached_pod)
+        if conn_event or policy_event:
+            # Update cache
+            self.pod_cache[pod_name] = event['object']
+            if conn_event:
+                LOG.debug("Sending connectivity event for event %s on pod %s",
+                          event_type, pod_name)
+                self._send_connectivity_event(pod_name, event_type)
+            if policy_event:
+                LOG.debug("Sending policy event %s for pod %s",
+                          event_type, pod_name)
+                self._send_policy_event(pod_name, event_type)
+
+        # Remove item from cache if it was deleted
+        if event_type == 'DELETED':
+            del self.pod_cache[pod_name]
 
     def process(self):
         # This might raise StopIteration

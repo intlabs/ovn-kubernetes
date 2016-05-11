@@ -2,9 +2,10 @@ import json
 
 from oslo_log import log
 
+import ovn_k8s
 from ovn_k8s import constants
 from ovn_k8s import policy_processor as pp
-from ovn_k8s import utils
+from ovn_k8s.lib import kubernetes as k8s
 from ovn_k8s.watcher import registry
 
 LOG = log.getLogger(__name__)
@@ -23,9 +24,9 @@ class NamespaceWatcher(object):
             registry.WatcherRegistry.get_instance().k8s_np_watcher)
 
     def _send_event(self, ns_name, event_type):
-        event = pp.Event(EVENT_MAP[event_type],
-                         source=ns_name,
-                         metadata=self.ns_cache[ns_name])
+        event = ovn_k8s.Event(EVENT_MAP[event_type],
+                              source=ns_name,
+                              metadata=self.ns_cache[ns_name])
         pp.get_event_queue().put((constants.NS_EVENT_PRIORITY,
                                   event))
 
@@ -51,7 +52,7 @@ class NamespaceWatcher(object):
         isolated = None
         was_isolated = None
         was_isolated = cached_ns.get('isolated', False)
-        isolated = utils.is_namespace_isolated(ns_name)
+        isolated = k8s.is_namespace_isolated(ns_name)
         ns_metadata['isolated'] = isolated
         self.ns_cache[ns_name] = ns_metadata
         # Always send events for namespaces that are not in cache
