@@ -119,12 +119,6 @@ For every service ip address, the L3 gateway should choose one of the pod
 endpoints as the destination.
 
 
-Overlay mode
-------------
-
-TBA.
-
-
 CNI plugin
 ------------
 
