@@ -242,7 +242,6 @@ def _cni_del(container_id, network_config):
 def cni_add(args):
     try:
         LOG.debug("Reading configuration on standard input")
-        LOG.debug("As for the env...")
         network_config = _parse_stdin()
         container_id = os.environ.get(constants.CNI_CONTAINER_ID)
         LOG.info("Configuring networking for container:%s", container_id)

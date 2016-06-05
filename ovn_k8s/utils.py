@@ -2,17 +2,20 @@ import random
 import subprocess
 
 
-def call_popen(cmd):
+def call_popen(cmd, input_data):
     """Invoke subprocess"""
-    child = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-    output = child.communicate()
-    if child.returncode:
-        raise RuntimeError("Fatal error executing %s" % " ".join(cmd))
-    if not output or not output[0]:
-        output = ""
+    proc = subprocess.Popen(cmd,
+                            stdin=subprocess.PIPE if input_data else None,
+                            stdout=subprocess.PIPE)
+    stdout, stderr = proc.communicate(input_data)
+    if proc.returncode:
+        raise RuntimeError("Fatal error executing %s: %s" %
+                           (" ".join(cmd), stderr))
+    if not stdout:
+        stdout = ""
     else:
-        output = output[0].strip()
-    return output
+        stdout = stdout.strip()
+    return stdout
 
 
 def generate_mac(prefix="00:00:00"):
