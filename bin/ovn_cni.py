@@ -17,6 +17,7 @@ from ovn_k8s.lib import kubernetes as k8s
 from ovn_k8s import utils
 
 LOG = log.getLogger(__name__)
+SUPPORTED_CNI_IPAM_PLUGINS = 'host-local'
 
 
 class OVNCNIException(Exception):
@@ -46,15 +47,14 @@ def _parse_stdin():
 
 
 def _setup_interface(pid, container_id, dev, mac,
-                     ip_address, prefixlen, gateway_ip):
+                     ip_address, gateway_ip):
     """Configure veth pair for container
 
     :param pid: pod's infra container pid.
     :param container_id: pod's infra container docker id
     :param dev: the interface on the pod infra container to configure
     :param mac: MAC address for the container-side veth
-    :param ip_address: IP address to be assigned to the pod
-    :param prefixlen: prefix lenght for IP address
+    :param ip_address: IP address (including prefix)
     :param gateway_ip: gateway IP address for the interface
 
     :returns: veth pair name as a tuple
@@ -100,8 +100,8 @@ def _setup_interface(pid, container_id, dev, mac,
         # Set the ip address
         LOG.debug("Setting IP address for container:%s interface:%s",
                   container_id, dev)
-        command = "ip netns exec %s ip addr add %s/%s dev %s" \
-                  % (pid, ip_address, prefixlen, dev)
+        command = "ip netns exec %s ip addr add %s dev %s" \
+                  % (pid, ip_address, dev)
         utils.call_popen(shlex.split(command))
         # Set the mac address
         LOG.debug("Setting MAC address for container:%s interface:%s",
@@ -128,10 +128,51 @@ def _generate_container_ip(cidr):
         ip_address = netaddr.IPAddress(random.randint(
             cidr.first + 2, cidr.last - 1))
         gateway_ip = netaddr.IPAddress(cidr.first + 1)
-        return ip_address, gateway_ip
+        return "%s/%d" % (ip_address, cidr.prefixlen), str(gateway_ip)
     except Exception:
         LOG.exception("Error while generating IP adress from CIDR:%s", cidr)
         raise OVNCNIException(104, "Failure while generating pod IP address")
+
+
+def _run_ipam_plugin(plugin_name, action, network_config):
+    # The plugin executable must be in CNI_PATH or PATH
+    cni_path = os.environ.get('CNI_PATH')
+    if cni_path:
+        os.environ['PATH'] = "%s:%s" % (os.environ['PATH'], cni_path)
+    return utils.call_popen(shlex.split('%s %s' % (plugin_name, action)),
+                            json.dumps(network_config))
+
+
+def _clean_cni_args_env(cni_args):
+    # Remove kubernetes specific items from CNI_ARGS
+    ipam_cni_args_str = ""
+    for arg_name, arg_value in cni_args.items():
+        if not arg_name.startswith('K8S'):
+            ipam_cni_args_str = "%s;%s=%s" % (
+                ipam_cni_args_str, arg_name, arg_value)
+    os.environ[constants.CNI_ARGS] = ipam_cni_args_str
+
+
+def _cni_ipam_add(network_config, cni_args):
+    ipam_type = network_config['ipam'].get('type')
+    if ipam_type in SUPPORTED_CNI_IPAM_PLUGINS:
+        original_cni_args_str = os.environ[constants.CNI_ARGS][:]
+        _clean_cni_args_env(cni_args)
+        # Run the external IPAM plugin
+        result = json.loads(_run_ipam_plugin(ipam_type, 'ADD', network_config))
+        # Restore CNI_ARGS
+        os.environ[constants.CNI_ARGS] = original_cni_args_str
+
+        # TODO(salv-orlando): Support dual-stack IP configuration
+        ip_info = result.get('ip4', result.get('ip6'))
+        if not ip_info:
+            raise OVNCNIException(
+                110, "No IP info returned by IPAM plugin: %s", result)
+        LOG.debug("Plugin %s allocated: %s", ipam_type, ip_info)
+        return ip_info['ip'], ip_info.get('gateway')
+    else:
+        cidr = netaddr.IPNetwork(network_config['ipam']['subnet'])
+        return _generate_container_ip(cidr)
 
 
 def _cni_add(network_config):
@@ -150,13 +191,12 @@ def _cni_add(network_config):
             raise OVNCNIException(
                 103, "Unable to extract container pid from namespace")
         pid = pid_match.groups()[0]
-        cidr = netaddr.IPNetwork(network_config['ipam']['subnet'])
         mac = utils.generate_mac()
     except KeyError:
         raise OVNCNIException(102, 'Required CNI variables missing')
 
-    # Generate container IP
-    ip_address, gateway_ip = _generate_container_ip(cidr)
+    # IPAM call
+    ip_address, gateway_ip = _cni_ipam_add(network_config, cni_args)
 
     api_server_host, api_server_port = k8s.get_k8s_api_server()
     # TODO(me): This should be a single class
@@ -177,7 +217,7 @@ def _cni_add(network_config):
 
     # Configure the veth pair for the pod
     veth_inside, veth_outside = _setup_interface(
-        pid, container_id, dev, mac, ip_address, cidr.prefixlen, gateway_ip)
+        pid, container_id, dev, mac, ip_address, gateway_ip)
 
     # Add the port to a OVS bridge and set the vlan
     try:
@@ -194,15 +234,13 @@ def _cni_add(network_config):
     return {
         'ip_address': ip_address,
         'gateway_ip': gateway_ip,
-        'mac_address': mac,
-        'network': cidr}
+        'mac_address': mac}
 
 
 def _cni_output(result):
     output = {'cniVersion': constants.CNI_VERSION,
-              'ip4': {'ip': '%s/%s' % (result['ip_address'],
-                                       result['network'].prefixlen),
-                      'gateway': str(result['gateway_ip'])}}
+              'ip4': {'ip': result['ip_address'],
+                      'gateway': result['gateway_ip']}}
     print(json.dumps(output))
 
 
@@ -215,11 +253,24 @@ def init_host(args):
                   args.k8s_api_server_port)
 
 
+def _cni_ipam_del(network_config, cni_args):
+    ipam_type = network_config['ipam'].get('type')
+    if ipam_type in SUPPORTED_CNI_IPAM_PLUGINS:
+        original_cni_args_str = os.environ[constants.CNI_ARGS][:]
+        _clean_cni_args_env(cni_args)
+        # Run the external IPAM plugin
+        _run_ipam_plugin(ipam_type, 'DEL', network_config)
+        # Restore CNI_ARGS
+        os.environ[constants.CNI_ARGS] = original_cni_args_str
+    # The builtin IP generator does not need to anything on delete
+
+
 def _cni_del(container_id, network_config):
-    # Remove IP allocation
-    # Oh wait, we do not store them anyway, so why bother at all?
-    # Remove OVN ACLs...
-    # TODO: We might first want to have the code that adds them
+    cni_args_str = os.environ.get(constants.CNI_ARGS, "")
+    # CNI_ARGS has the format key=value;key2=value2;...
+    cni_args = dict(item.split('=') for item in cni_args_str.split(';'))
+
+    _cni_ipam_del(network_config, cni_args)
     try:
         ovn.ovs_vsctl("del-port", container_id[:15])
     except Exception:

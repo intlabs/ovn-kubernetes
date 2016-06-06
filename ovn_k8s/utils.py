@@ -2,7 +2,7 @@ import random
 import subprocess
 
 
-def call_popen(cmd, input_data):
+def call_popen(cmd, input_data=None):
     """Invoke subprocess"""
     proc = subprocess.Popen(cmd,
                             stdin=subprocess.PIPE if input_data else None,
@@ -10,7 +10,7 @@ def call_popen(cmd, input_data):
     stdout, stderr = proc.communicate(input_data)
     if proc.returncode:
         raise RuntimeError("Fatal error executing %s: %s" %
-                           (" ".join(cmd), stderr))
+                           (" ".join(cmd), stdout))
     if not stdout:
         stdout = ""
     else:
