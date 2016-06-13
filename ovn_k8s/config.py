@@ -20,7 +20,10 @@ def init_conf(args):
         cfg.FloatOpt('coalesce_interval', default='0.1',
                      help=('Interval in seconds for coalescing events.'
                            'There will be a delay in event processing equal '
-                           'to the value of this parameter'))]
+                           'to the value of this parameter')),
+        cfg.BoolOpt('enable_networkpolicy', default=False,
+                    help=('Set to True to enable watching and processing '
+                          'network policy objects'))]
     cfg.CONF.register_opts(opts)
     cfg.CONF(args=args, project='ovn-k8s')
 

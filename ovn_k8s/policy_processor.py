@@ -67,23 +67,11 @@ def _remove_all_acls(pod_name):
 
 
 def _fetch_lport(pod):
-    """Retrieve a logical from the cache or the OVN NB DB.
-
-    The routine invokes OVN in case a cache miss, but does not
-    update the cache.
-    """
-    ovndb_watcher = WATCHER_REGISTRY.ovndb_watcher
-    if not ovndb_watcher:
-        lport_data = None
-        LOG.warn("OVN DB watcher not set. This could be troublesome")
-    else:
-        lport_data = ovndb_watcher.port_cache.get(pod)
-    if not lport_data:
-        lport_data_raw = ovn.ovn_nbctl(
-            'find', 'Logical_Port', 'external_ids:pod_name=%s' % pod)
-        lport_data = ovn.parse_ovn_nbctl_output(lport_data_raw)
-        lport_data = lport_data[0]
-    return lport_data
+    """Retrieve a logical from the OVN NB DB."""
+    lport_data_raw = ovn.ovn_nbctl(
+        'find', 'Logical_Port', 'external_ids:pod_name=%s' % pod)
+    lport_data = ovn.parse_ovn_nbctl_output(lport_data_raw)
+    return lport_data[0]
 
 
 def _fetch_pod(pod, namespace):

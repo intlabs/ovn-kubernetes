@@ -53,19 +53,25 @@ def _create_k8s_np_watcher():
 
 
 def start_threads():
-    np_watcher_inst = _create_k8s_np_watcher()
     ns_watcher_inst = _create_k8s_ns_watcher()
     pod_watcher_inst = _create_k8s_pod_watcher()
     pool = greenpool.GreenPool()
-    LOG.debug("Starting Pod Event processor")
+
+    if cfg.CONF.enable_networkpolicy:
+        np_watcher_inst = _create_k8s_np_watcher()
+        LOG.debug("Starting Network Policy event processor")
+        pool.spawn(pp.run_processor)
+        LOG.info("Starting Kubernetes Network Policy watcher")
+        pool.spawn(_process_func, np_watcher_inst, _create_k8s_np_watcher)
+    else:
+        LOG.debug("Network Policy processor not started - "
+                  "feature disabled by configuration")
+
+    LOG.debug("Starting Pod event processor")
     pool.spawn(cp.run_processor)
-    LOG.debug("Starting Policy processor")
-    pool.spawn(pp.run_processor)
     LOG.info("Starting Kubernetes Namespace watcher")
     pool.spawn(_process_func, ns_watcher_inst, _create_k8s_ns_watcher)
     LOG.info("Starting Kubernetes Pod watcher")
     pool.spawn(_process_func, pod_watcher_inst, _create_k8s_pod_watcher)
-    LOG.info("Starting Kubernetes Network Policy watcher")
-    pool.spawn(_process_func, np_watcher_inst, _create_k8s_np_watcher)
     pool.waitall()
     np_watcher_inst.close()
