@@ -73,5 +73,10 @@ def start_threads():
     pool.spawn(_process_func, ns_watcher_inst, _create_k8s_ns_watcher)
     LOG.info("Starting Kubernetes Pod watcher")
     pool.spawn(_process_func, pod_watcher_inst, _create_k8s_pod_watcher)
-    pool.waitall()
-    np_watcher_inst.close()
+    try:
+        pool.waitall()
+    except KeyboardInterrupt:
+        LOG.info("Caught SIGTERM. Shutting down")
+    finally:
+        if cfg.CONF.enable_networkpolicy:
+            np_watcher_inst.close()
