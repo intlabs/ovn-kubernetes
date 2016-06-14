@@ -42,12 +42,12 @@ class ConnectivityProcessor(ovn_k8s.BaseProcessor):
                   lswitch_name, pod_name)
         # Use pod name as port name
         try:
-            ovn.ovn_nbctl('lport-add', lswitch_name, container_id)
+            ovn.ovn_nbctl('lsp-add', lswitch_name, container_id)
             # Store the port name and the kubernetes pod name in the ACL's
             # external  IDs. This will make retrieval easier
             # Store pod and amespace names in port's external ids in order
             # to keep track of the association between pod and logical port
-            ovn.ovn_nbctl('set', 'Logical_port', container_id,
+            ovn.ovn_nbctl('set', 'Logical_Switch_port', container_id,
                           'external_ids:pod_name=%s' % pod_name,
                           'external_ids:ns_name=%s' % ns_name)
             # Block all ingress traffic
@@ -69,7 +69,7 @@ class ConnectivityProcessor(ovn_k8s.BaseProcessor):
         try:
             container_id = (event.metadata['metadata']['annotations']
                             ['infraContainerId'])
-            ovn.ovn_nbctl("lport-del", container_id)
+            ovn.ovn_nbctl("lsp-del", container_id)
         except Exception:
             LOG.exception("Unable to remove OVN logical port %s for pod: %s",
                           container_id, event.source)
@@ -83,7 +83,8 @@ class ConnectivityProcessor(ovn_k8s.BaseProcessor):
         container_id = (event.metadata['metadata']['annotations']
                         ['infraContainerId'])
         lport_data_raw = ovn.ovn_nbctl(
-            'find', 'Logical_Port', 'external_ids:pod_name=%s' % pod_name)
+            'find', 'Logical_Switch_Port',
+            'external_ids:pod_name=%s' % pod_name)
         lport_data = ovn.parse_ovn_nbctl_output(lport_data_raw)
         if not lport_data:
             self._add_lport(container_id, event)
@@ -98,7 +99,7 @@ class ConnectivityProcessor(ovn_k8s.BaseProcessor):
             return
         LOG.debug("Setting up MAC (%s) and IP (%s) addresses for logical port",
                   pod_mac, pod_ip)
-        cmd_items = tuple(shlex.split('lport-set-addresses %s "%s %s"' %
+        cmd_items = tuple(shlex.split('lsp-set-addresses %s "%s %s"' %
                                       (container_id, pod_mac, pod_ip)))
         ovn.ovn_nbctl(*cmd_items)
         # Process policies too for this event

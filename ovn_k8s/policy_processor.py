@@ -69,7 +69,7 @@ def _remove_all_acls(pod_name):
 def _fetch_lport(pod):
     """Retrieve a logical from the OVN NB DB."""
     lport_data_raw = ovn.ovn_nbctl(
-        'find', 'Logical_Port', 'external_ids:pod_name=%s' % pod)
+        'find', 'Logical_Switch_Port', 'external_ids:pod_name=%s' % pod)
     lport_data = ovn.parse_ovn_nbctl_output(lport_data_raw)
     return lport_data[0]
 

@@ -72,7 +72,7 @@ def init_host(host_name, host_subnet):
     else:
         LOG.debug("Creating LogicalSwitch for K8S host with name: %s",
                   lswitch_name)
-        ovn.ovn_nbctl('lswitch-add', lswitch_name)
+        ovn.ovn_nbctl('ls-add', lswitch_name)
 
     # Check for logical router port connecting local logical switch to
     # kubernetes router.
@@ -100,9 +100,9 @@ def init_host(host_name, host_subnet):
                                                     cidr.prefixlen),
                                  'mac="%s"' % lrp_mac, '--', 'add',
                                  'Logical_Router', lrouter_name, 'ports',
-                                 '@lrp', '--', 'lport-add',
+                                 '@lrp', '--', 'lsp-add',
                                  lswitch_name, 'rp-%s' % lswitch_name)
-        ovn.ovn_nbctl('set', 'Logical_port', 'rp-%s' % lswitch_name,
+        ovn.ovn_nbctl('set', 'Logical_Switch_port', 'rp-%s' % lswitch_name,
                       'type=router', 'options:router-port=%s' % lswitch_name,
                       'addresses="%s"' % lrp_mac)
         LOG.debug("Configured logical router port: %s", lrp_uuid)
