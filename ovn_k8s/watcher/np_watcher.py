@@ -1,5 +1,3 @@
-import json
-
 from eventlet import greenthread
 from oslo_config import cfg
 from oslo_log import log
@@ -9,6 +7,8 @@ import ovn_k8s
 from ovn_k8s import constants
 from ovn_k8s.lib import kubernetes as k8s
 from ovn_k8s import policy_processor as pp
+from ovn_k8s import utils
+
 
 LOG = log.getLogger(__name__)
 EVENT_MAP = {
@@ -26,13 +26,12 @@ class NetworkPolicyNSWatcher(object):
         self._np_stream = np_stream
         self._queue = queue
 
+    def _queue_event(self, json_event):
+        self._queue.put(json_event)
+
     def process(self):
-        line = self._np_stream.next()
-        try:
-            self._queue.put(json.loads(line))
-        except ValueError:
-            LOG.debug("Invalid JSON data: received from policy watcher for "
-                      "namespace %s: %s", self._namespace, line)
+        utils.process_stream(self._np_stream,
+                             self._queue_event)
 
 
 class NetworkPolicyWatcher(object):

@@ -1,5 +1,10 @@
+import json
 import random
 import subprocess
+
+from oslo_log import log
+
+LOG = log.getLogger(__name__)
 
 
 def call_popen(cmd, input_data=None):
@@ -28,3 +33,13 @@ def generate_mac(prefix="00:00:00"):
         random.randint(0, 255),
         random.randint(0, 255))
     return mac
+
+
+def process_stream(data_stream, event_callback):
+    # StopIteration will be caught in the routine that sets up the stream
+    # and reconnects it
+    line = data_stream.next()
+    try:
+        event_callback(json.loads(line))
+    except ValueError:
+        LOG.debug("Invalid JSON data from response stream:%s", line)

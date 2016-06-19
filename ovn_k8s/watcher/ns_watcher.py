@@ -1,5 +1,3 @@
-import json
-
 from oslo_log import log
 
 import ovn_k8s
@@ -7,6 +5,7 @@ from ovn_k8s import constants
 from ovn_k8s import policy_processor as pp
 from ovn_k8s.lib import kubernetes as k8s
 from ovn_k8s.watcher import registry
+from ovn_k8s import utils
 
 LOG = log.getLogger(__name__)
 EVENT_MAP = {
@@ -60,13 +59,9 @@ class NamespaceWatcher(object):
             # Must send event
             self._send_event(ns_name, event_type)
         else:
-            LOG.debug("No change deteced in namespace isolation for:%s",
+            LOG.debug("No change detected in namespace isolation for:%s",
                       ns_name)
 
     def process(self):
-        # This might raise StopIteration
-        line = self._ns_stream.next()
-        try:
-            self._process_ns_event(json.loads(line))
-        except ValueError:
-            LOG.debug("Invalid JSON data:%s", line)
+        utils.process_stream(self._ns_stream,
+                             self._process_ns_event)

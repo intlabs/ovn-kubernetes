@@ -1,11 +1,10 @@
-import json
-
 from oslo_log import log
 
 import ovn_k8s
 from ovn_k8s import constants
-from ovn_k8s import policy_processor as pp
 from ovn_k8s import conn_processor as cp
+from ovn_k8s import policy_processor as pp
+from ovn_k8s import utils
 
 LOG = log.getLogger(__name__)
 EVENT_MAP = {
@@ -102,9 +101,5 @@ class PodWatcher(object):
             del self.pod_cache[pod_name]
 
     def process(self):
-        # This might raise StopIteration
-        line = self._pod_stream.next()
-        try:
-            self._process_pod_event(json.loads(line))
-        except ValueError:
-            LOG.debug("Invalid JSON data:%s", line)
+        utils.process_stream(self._pod_stream,
+                             self._process_pod_event)
