@@ -13,6 +13,12 @@ EVENT_MAP = {
     'DELETED': constants.POD_DEL
 }
 
+INFRA_CTR_ID = "infraContainerID"
+POD_IP = "podIP"
+POD_MAC = "podMAC"
+NODE_NAME = "nodeName"
+CONN_REQUIRED_KEYS = set(POD_IP, POD_MAC, NODE_NAME, INFRA_CTR_ID)
+
 
 class PodWatcher(object):
 
@@ -20,85 +26,81 @@ class PodWatcher(object):
         self._pod_stream = pod_stream
         self.pod_cache = {}
 
-    def _send_policy_event(self, pod_name, event_type):
+    def _send_policy_event(self, event_type, pod_name, pod_data):
         ev = ovn_k8s.Event(EVENT_MAP[event_type],
                            source=pod_name,
                            metadata=self.pod_cache[pod_name])
         pp.get_event_queue().put((constants.POD_EVENT_PRIORITY, ev))
 
-    def _send_connectivity_event(self, pod_name, event_type):
+    def _send_connectivity_event(self, event_type, pod_name, pod_data):
         ev = ovn_k8s.Event(EVENT_MAP[event_type],
                            source=pod_name,
-                           metadata=self.pod_cache[pod_name])
+                           metadata=pod_data)
         cp.get_event_queue().put((constants.POD_EVENT_PRIORITY, ev))
 
-    def _process_pod_policies(self, pod_name, event_type, event, cached_pod):
-        LOG.debug("Checking policy event %s for pod %s",
-                  event_type, pod_name)
-        pod_ip = event['object']['status'].get('podIP')
-        pod_metadata = event['object']['metadata']
-        if cached_pod and not pod_ip:
-            pod_ip = cached_pod['status'].get('podIP')
-        if not pod_ip:
-            LOG.debug("No IP address yet assigned to pod %s - skipping",
-                      pod_name)
-            return
-        if cached_pod:
-            # Check whether the event is worth being considered
-            if (pod_metadata['labels'] != cached_pod['metadata']['labels']):
-                LOG.debug("Detected label change for pod %s", pod_name)
-                return True
+    def _check_pod_data(self, pod_name, pod_data):
+        required_conn_data = {
+            POD_IP: pod_data['status'].get(POD_IP),
+            POD_MAC: pod_data['metadata']['annotations'].get(POD_MAC),
+            NODE_NAME: pod_data['spec'].get(NODE_NAME),
+            INFRA_CTR_ID: pod_data['metadata']['annotations'].get(INFRA_CTR_ID)
+        }
+        return all(required_conn_data.values())
 
-    def _process_pod_connectivity(self, pod_name, event_type,
-                                  event, cached_pod):
-        LOG.debug("Checking connectivity event %s for pod %s",
-                  event_type, pod_name)
-        # Always process upon deletion as logical port and acls must be
-        # destroyed
-        if event_type == 'DELETED':
-            return True
-        # Process when node Name, pod IP, pod MAC, and Infra container ID are
-        # available, but avoid sending duplicate events
-        pod_ip = event['object']['status'].get('podIP')
-        pod_mac = event['object']['metadata']['annotations'].get('podMAC')
-        pod_infra_id = event['object']['metadata']['annotations'].get(
-            'infraContainerId')
-        node_name = event['object']['spec'].get('nodeName')
-        if pod_ip and pod_mac and pod_infra_id and node_name:
-            if not cached_pod:
-                return True
-            if (pod_ip != cached_pod['status'].get('podIP') or
-                pod_mac != cached_pod['metadata']['annotations'].get(
-                    'podMAC') or
-                pod_infra_id != cached_pod['metadata']['annotations'].get(
-                    'infraContainerId') or
-                node_name != cached_pod['spec'].get('nodeName')):
-                return True
-        LOG.debug("Will not send a connectivity event for pod: %s", pod_name)
-
-    def _process_pod_event(self, event):
-        pod_name = event['object']['metadata']['name']
-        event_type = event['type']
-        cached_pod = self.pod_cache.get(pod_name)
-        conn_event = self._process_pod_connectivity(pod_name, event_type,
-                                                    event, cached_pod)
-        policy_event = self._process_pod_policies(pod_name, event_type,
-                                                  event, cached_pod)
-        if conn_event or policy_event:
-            # Update cache
-            self.pod_cache[pod_name] = event['object']
-            if conn_event:
-                LOG.debug("Sending connectivity event for event %s on pod %s",
-                          event_type, pod_name)
-                self._send_connectivity_event(pod_name, event_type)
-            if policy_event:
-                LOG.debug("Sending policy event %s for pod %s",
-                          event_type, pod_name)
-                self._send_policy_event(pod_name, event_type)
-
+    def _update_pod_cache(self, event_type, pod_name, pod_data):
         # Remove item from cache if it was deleted
         if event_type == 'DELETED':
             del self.pod_cache[pod_name]
+        else:
+            # Update cache
+            self.pod_cache[pod_name] = pod_data
+
+    def _process_pod_event(self, event):
+        pod_data = event['object']
+        pod_name = pod_data['metadata']['name']
+        event_type = event['type']
+        cached_pod = self.pod_cache.get(pod_name, {})
+        if not self._check_pod_data(pod_name, pod_data):
+            LOG.info("Not enough data for configuring connectivity and "
+                     "policies for Pod:%s", pod_name)
+            return
+
+        has_conn_event = False
+        has_policy_event = False
+        if not cached_pod:
+            has_conn_event = True
+            has_policy_event = True
+        elif event_type == 'DELETED':
+            has_conn_event = True
+            has_policy_event = True
+        else:
+            pod_changes = utils.has_changes(cached_pod, pod_data)
+            status_changes = POD_IP in pod_changes.get('status', {})
+            spec_changes = NODE_NAME in pod_changes.get('spec')
+            pod_meta_changes = pod_changes.get('metadata')
+            ann_changes = (POD_MAC in pod_meta_changes.get('annotations') or
+                           POD_IP in pod_meta_changes.get('annotations'))
+            label_changes = pod_meta_changes.get('labels')
+
+            if not any(status_changes, spec_changes, ann_changes):
+                LOG.info("No relevant connectivity change for Pod:%s, "
+                         "not sending event", pod_name)
+            else:
+                has_conn_event = True
+            if not label_changes:
+                LOG.info("No relevant network policy changes for Pod:%s, "
+                         "not sending event", pod_name)
+            else:
+                has_policy_event = True
+
+        if has_conn_event:
+            LOG.debug("Sending connectivity event for event %s on pod %s",
+                      event_type, pod_name)
+            self._send_connectivity_event(event_type, pod_name, pod_data)
+        if has_policy_event:
+            LOG.debug("Sending policy event for event %s on pod %s",
+                      event_type, pod_name)
+            self._send_policy_event(event_type, pod_name, pod_data)
 
     def process(self):
         utils.process_stream(self._pod_stream,
