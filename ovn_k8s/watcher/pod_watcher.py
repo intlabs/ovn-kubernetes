@@ -13,7 +13,7 @@ EVENT_MAP = {
     'DELETED': constants.POD_DEL
 }
 
-INFRA_CTR_ID = "infraContainerID"
+INFRA_CTR_ID = "infraContainerId"
 POD_IP = "podIP"
 POD_MAC = "podMAC"
 NODE_NAME = "nodeName"
@@ -29,7 +29,7 @@ class PodWatcher(object):
     def _send_policy_event(self, event_type, pod_name, pod_data):
         ev = ovn_k8s.Event(EVENT_MAP[event_type],
                            source=pod_name,
-                           metadata=self.pod_cache[pod_name])
+                           metadata=pod_data)
         pp.get_event_queue().put((constants.POD_EVENT_PRIORITY, ev))
 
     def _send_connectivity_event(self, event_type, pod_name, pod_data):
@@ -61,7 +61,10 @@ class PodWatcher(object):
         pod_name = pod_data['metadata']['name']
         event_type = event['type']
         cached_pod = self.pod_cache.get(pod_name, {})
-        if not self._check_pod_data(pod_name, pod_data):
+        self._update_pod_cache(event_type, pod_name, pod_data)
+
+        if (event_type != 'DELETED' and not
+            self._check_pod_data(pod_name, pod_data)):
             LOG.info("Not enough data for configuring connectivity and "
                      "policies for Pod:%s", pod_name)
             return
@@ -77,13 +80,14 @@ class PodWatcher(object):
         else:
             pod_changes = utils.has_changes(cached_pod, pod_data)
             status_changes = POD_IP in pod_changes.get('status', {})
-            spec_changes = NODE_NAME in pod_changes.get('spec')
-            pod_meta_changes = pod_changes.get('metadata')
-            ann_changes = (POD_MAC in pod_meta_changes.get('annotations') or
-                           POD_IP in pod_meta_changes.get('annotations'))
+            spec_changes = NODE_NAME in pod_changes.get('spec', {})
+            pod_meta_changes = pod_changes.get('metadata', {})
+            ann_changes = (POD_MAC in pod_meta_changes.get('annotations', {})
+                           or
+                           POD_IP in pod_meta_changes.get('annotations', {}))
             label_changes = pod_meta_changes.get('labels')
 
-            if not any(status_changes, spec_changes, ann_changes):
+            if not any((status_changes, spec_changes, ann_changes)):
                 LOG.info("No relevant connectivity change for Pod:%s, "
                          "not sending event", pod_name)
             else:

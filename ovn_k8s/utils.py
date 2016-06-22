@@ -59,7 +59,8 @@ def has_changes(new_value, old_value):
     """
     # Special case for strings. Treating them as lists is just unnecessary
     # complexity
-    if isinstance(new_value, str) and isinstance(old_value, str):
+    if (isinstance(new_value, basestring) and
+        isinstance(old_value, basestring)):
         return _scalar_diff(old_value, new_value)
 
     # Check if we're dealing with a dict
@@ -75,7 +76,7 @@ def has_changes(new_value, old_value):
         try:
             old_value_copy = list(old_value[:])
         except TypeError:
-            # if it's not iterabile, then it must be scalar. Or at least we
+            # if it's not iterable, then it must be scalar. Or at least we
             # can consider it as a scalar.
             return _scalar_diff(old_value, new_value)
 
