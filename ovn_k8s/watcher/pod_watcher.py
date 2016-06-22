@@ -17,7 +17,7 @@ INFRA_CTR_ID = "infraContainerID"
 POD_IP = "podIP"
 POD_MAC = "podMAC"
 NODE_NAME = "nodeName"
-CONN_REQUIRED_KEYS = set(POD_IP, POD_MAC, NODE_NAME, INFRA_CTR_ID)
+CONN_REQUIRED_KEYS = set([POD_IP, POD_MAC, NODE_NAME, INFRA_CTR_ID])
 
 
 class PodWatcher(object):
@@ -39,11 +39,12 @@ class PodWatcher(object):
         cp.get_event_queue().put((constants.POD_EVENT_PRIORITY, ev))
 
     def _check_pod_data(self, pod_name, pod_data):
+        pod_annotations = pod_data['metadata'].get('annotations', {})
         required_conn_data = {
             POD_IP: pod_data['status'].get(POD_IP),
-            POD_MAC: pod_data['metadata']['annotations'].get(POD_MAC),
+            POD_MAC: pod_annotations.get(POD_MAC),
             NODE_NAME: pod_data['spec'].get(NODE_NAME),
-            INFRA_CTR_ID: pod_data['metadata']['annotations'].get(INFRA_CTR_ID)
+            INFRA_CTR_ID: pod_annotations.get(INFRA_CTR_ID)
         }
         return all(required_conn_data.values())
 
