@@ -124,13 +124,19 @@ def get_pod_annotations(host, port, namespace, pod):
 def set_pod_annotation(host, port, namespace, pod, name, value):
     url = ("http://%s:%d/api/v1/namespaces/%s/pods/%s" %
            (host, port, namespace, pod))
-    patch = {'op': 'add',
-             'path': '/metadata/annotations/%s' % name,
-             'value': value}
+    # NOTE: This is not probably compliant with RFC 7386 but appears to work
+    # with the kubernetes API server.
+    patch = {
+        'metadata': {
+            'annotations': {
+                name: value
+            }
+        }
+    }
     response = requests.patch(
         url,
-        data=json.dumps([patch]),
-        headers={'Content-Type': 'application/json-patch+json'})
+        data=json.dumps(patch),
+        headers={'Content-Type': 'application/merge-patch+json'})
     if not response or response.status_code != 200:
         # TODO(me): Raise appropriate exception
         raise Exception("Something went wrong while annotating pod: %s" %
